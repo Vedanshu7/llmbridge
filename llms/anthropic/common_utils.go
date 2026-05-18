@@ -15,24 +15,6 @@ const (
 	apiVersion = "2023-06-01"
 )
 
-// do executes a blocking POST and returns the raw http.Response without
-// reading the body.
-func (p *Provider) do(body []byte) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, exceptions.NewProviderError("anthropic", 0, err.Error(), err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", apiVersion)
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, exceptions.NewProviderError("anthropic", 0, err.Error(), err)
-	}
-	return resp, nil
-}
-
 // doStream opens a streaming HTTP connection without a read deadline.
 func (p *Provider) doStream(body []byte) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
