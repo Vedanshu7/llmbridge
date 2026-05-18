@@ -114,3 +114,33 @@ type Property struct {
 	// Enum restricts valid values. Leave nil for free-form input.
 	Enum []string
 }
+
+// Streamer is an optional interface that providers may implement to support
+// token-by-token streaming responses. Use a type assertion to check availability:
+//
+//	if s, ok := provider.(llmbridge.Streamer); ok {
+//	    ch, err := s.Stream(ctx, req)
+//	}
+//
+// The returned channel is closed when the stream ends. A final Delta with
+// Done == true signals clean completion; Err != nil signals failure.
+type Streamer interface {
+	Stream(ctx context.Context, req Request) (<-chan Delta, error)
+}
+
+// Delta is a single token or structured fragment emitted during streaming.
+// Accumulate Content fields to reconstruct the full response text.
+type Delta struct {
+	// Content is a text fragment to append to the response so far.
+	Content string
+
+	// ToolCall carries a partial or complete tool-call update.
+	// Non-nil when the model is streaming a function invocation.
+	ToolCall *ToolCall
+
+	// Done is true on the final Delta. Content and ToolCall are empty.
+	Done bool
+
+	// Err is non-nil if the stream terminated with an error.
+	Err error
+}
