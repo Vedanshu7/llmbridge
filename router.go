@@ -11,6 +11,19 @@ import (
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
+// HealthStatus records the last known health of a provider.
+type HealthStatus struct {
+	Healthy   bool
+	LastCheck time.Time
+	LastError error
+}
+
+// TaggedProvider pairs a Provider with routing tags.
+type TaggedProvider struct {
+	Provider Provider
+	Tags     []string // e.g. ["fast", "cheap", "vision"]
+}
+
 // Strategy controls how the Router picks a provider for each request.
 type Strategy int
 
@@ -71,33 +84,76 @@ type RoutingGroup struct {
 // failover and load balancing. It implements Provider itself.
 type Router struct {
 	providers []Provider
+	tags      [][]string // parallel to providers; nil slice = any tags
 	strategy  Strategy
 	policy    RetryPolicy
 	groups    []RoutingGroup
+
+	contextWindowFallback bool
+	requiredTags          []string
 
 	mu       sync.Mutex
 	robin    int
 	latency  []time.Duration
 	observed []bool
-	inflight []int // per-provider in-flight request count (LeastBusy)
+	inflight []int     // per-provider in-flight request count (LeastBusy)
 	spent    []float64 // per-provider cumulative cost (CostBased)
+
+	health     []HealthStatus
+	healthStop context.CancelFunc
 }
 
 // NewRouter returns a Router that dispatches across the given providers.
 func NewRouter(providers []Provider, opts ...RouterOption) *Router {
 	r := &Router{
 		providers: providers,
+		tags:      make([][]string, len(providers)),
 		strategy:  PriorityOrder,
 		policy:    DefaultRetryPolicy,
 		latency:   make([]time.Duration, len(providers)),
 		observed:  make([]bool, len(providers)),
 		inflight:  make([]int, len(providers)),
 		spent:     make([]float64, len(providers)),
+		health:    makeHealthSlice(len(providers)),
 	}
 	for _, o := range opts {
 		o(r)
 	}
 	return r
+}
+
+// NewTagRouter returns a Router where each provider carries routing tags.
+// Use WithRequiredTags to filter providers by tag at request time.
+func NewTagRouter(providers []TaggedProvider, opts ...RouterOption) *Router {
+	ps := make([]Provider, len(providers))
+	ts := make([][]string, len(providers))
+	for i, tp := range providers {
+		ps[i] = tp.Provider
+		ts[i] = tp.Tags
+	}
+	r := &Router{
+		providers: ps,
+		tags:      ts,
+		strategy:  PriorityOrder,
+		policy:    DefaultRetryPolicy,
+		latency:   make([]time.Duration, len(ps)),
+		observed:  make([]bool, len(ps)),
+		inflight:  make([]int, len(ps)),
+		spent:     make([]float64, len(ps)),
+		health:    makeHealthSlice(len(ps)),
+	}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+func makeHealthSlice(n int) []HealthStatus {
+	s := make([]HealthStatus, n)
+	for i := range s {
+		s[i] = HealthStatus{Healthy: true}
+	}
+	return s
 }
 
 // RouterOption configures a Router.
@@ -116,6 +172,36 @@ func WithRetryPolicy(p RetryPolicy) RouterOption {
 // WithRoutingGroups registers named routing groups for per-model strategies.
 func WithRoutingGroups(groups []RoutingGroup) RouterOption {
 	return func(r *Router) { r.groups = groups }
+}
+
+// WithContextWindowFallback enables failover when a provider returns
+// ContextWindowExceededError, trying the next provider in the order.
+func WithContextWindowFallback(enabled bool) RouterOption {
+	return func(r *Router) { r.contextWindowFallback = enabled }
+}
+
+// WithRequiredTags restricts routing to providers whose tag set is a superset
+// of all the given tags. Only meaningful when using NewTagRouter.
+func WithRequiredTags(tags []string) RouterOption {
+	return func(r *Router) { r.requiredTags = tags }
+}
+
+// WithHealthChecks starts a background goroutine that calls ValidateEnvironment()
+// on each provider every interval. Providers that error are marked unhealthy and
+// skipped in routing until they recover.
+func WithHealthChecks(interval time.Duration) RouterOption {
+	return func(r *Router) {
+		ctx, cancel := context.WithCancel(context.Background())
+		r.healthStop = cancel
+		go r.runHealthChecks(ctx, interval)
+	}
+}
+
+// Stop cancels the health check goroutine if one was started.
+func (r *Router) Stop() {
+	if r.healthStop != nil {
+		r.healthStop()
+	}
 }
 
 // Name implements Provider.
@@ -137,11 +223,20 @@ func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Respon
 			return resp, nil
 		}
 		lastErr = err
-		if !isRetryable(err) {
+		if !isRetryable(err) && !r.isFallbackable(err) {
 			return nil, err
 		}
 	}
 	return nil, lastErr
+}
+
+// isFallbackable returns true if the error should trigger failover to the next provider.
+func (r *Router) isFallbackable(err error) bool {
+	if !r.contextWindowFallback {
+		return false
+	}
+	var cw *exceptions.ContextWindowExceededError
+	return errors.As(err, &cw)
 }
 
 // tryWithPolicy executes one provider with the configured retry policy.
@@ -181,39 +276,130 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Reques
 
 func (r *Router) pickOrder() []int {
 	n := len(r.providers)
-	if n == 1 {
-		return []int{0}
-	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Build candidate set: healthy and matching required tags.
+	eligible := make([]int, 0, n)
+	for i := range n {
+		if !r.health[i].Healthy {
+			continue
+		}
+		if len(r.requiredTags) > 0 && !hasAllTags(r.tags[i], r.requiredTags) {
+			continue
+		}
+		eligible = append(eligible, i)
+	}
+	// Fallback: if all providers are unhealthy, try them all anyway.
+	if len(eligible) == 0 {
+		eligible = seqOrder(n)
+	}
+
+	if len(eligible) == 1 {
+		return eligible
+	}
+
 	switch r.strategy {
 	case RoundRobin:
-		start := r.robin % n
+		k := len(eligible)
+		start := r.robin % k
 		r.robin++
-		order := make([]int, n)
-		for i := range n {
-			order[i] = (start + i) % n
+		order := make([]int, k)
+		for i := range k {
+			order[i] = eligible[(start+i)%k]
 		}
 		return order
 
 	case LeastLatency:
-		for _, seen := range r.observed {
-			if !seen {
-				return seqOrder(n)
+		allObserved := true
+		for _, idx := range eligible {
+			if !r.observed[idx] {
+				allObserved = false
+				break
 			}
 		}
-		return sortedByLatency(r.latency)
+		if !allObserved {
+			return eligible
+		}
+		lat := make([]time.Duration, len(eligible))
+		for i, idx := range eligible {
+			lat[i] = r.latency[idx]
+		}
+		sorted := sortedByLatency(lat)
+		out := make([]int, len(sorted))
+		for i, si := range sorted {
+			out[i] = eligible[si]
+		}
+		return out
 
 	case LeastBusy:
-		return sortedByInt(r.inflight)
+		inf := make([]int, len(eligible))
+		for i, idx := range eligible {
+			inf[i] = r.inflight[idx]
+		}
+		sorted := sortedByInt(inf)
+		out := make([]int, len(sorted))
+		for i, si := range sorted {
+			out[i] = eligible[si]
+		}
+		return out
 
 	case CostBased:
-		return sortedByFloat(r.spent)
+		sp := make([]float64, len(eligible))
+		for i, idx := range eligible {
+			sp[i] = r.spent[idx]
+		}
+		sorted := sortedByFloat(sp)
+		out := make([]int, len(sorted))
+		for i, si := range sorted {
+			out[i] = eligible[si]
+		}
+		return out
 
 	default: // PriorityOrder, UsageBased
-		return seqOrder(n)
+		return eligible
+	}
+}
+
+// hasAllTags returns true if providerTags contains every tag in required.
+func hasAllTags(providerTags, required []string) bool {
+	set := make(map[string]struct{}, len(providerTags))
+	for _, t := range providerTags {
+		set[t] = struct{}{}
+	}
+	for _, t := range required {
+		if _, ok := set[t]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// runHealthChecks pings all providers on interval and updates HealthStatus.
+func (r *Router) runHealthChecks(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.checkAllHealth()
+		}
+	}
+}
+
+func (r *Router) checkAllHealth() {
+	for i, p := range r.providers {
+		err := p.ValidateEnvironment()
+		r.mu.Lock()
+		r.health[i] = HealthStatus{
+			Healthy:   err == nil,
+			LastCheck: time.Now(),
+			LastError: err,
+		}
+		r.mu.Unlock()
 	}
 }
 

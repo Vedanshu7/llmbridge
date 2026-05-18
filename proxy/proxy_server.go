@@ -24,8 +24,10 @@ import (
 	"net"
 	"net/http"
 
+	llmbridge "github.com/Vedanshu7/llmbridge"
 	"github.com/Vedanshu7/llmbridge/llms/base"
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
+	"github.com/Vedanshu7/llmbridge/proxy/config"
 	"github.com/Vedanshu7/llmbridge/proxy/management"
 	"github.com/Vedanshu7/llmbridge/types"
 )
@@ -36,6 +38,7 @@ type Server struct {
 	keyStore  *auth.APIKeyStore
 	modelReg  *management.ModelRegistry
 	routerCfg *management.RouterConfig
+	jwtSecret []byte
 	mux       *http.ServeMux
 }
 
@@ -55,6 +58,28 @@ func NewServer(provider base.LLM) *Server {
 // KeyStore returns the server's API key store, allowing callers to
 // pre-populate keys before the server starts.
 func (s *Server) KeyStore() *auth.APIKeyStore { return s.keyStore }
+
+// SetJWTSecret configures the HS256 secret used to accept JWT bearer tokens.
+func (s *Server) SetJWTSecret(secret []byte) {
+	s.jwtSecret = secret
+	s.mux = s.buildMux() // rebuild mux so auth middleware picks up the new secret
+}
+
+// FromConfig constructs a Server pre-configured from a config.Config.
+func FromConfig(cfg *config.Config, provider base.LLM) *Server {
+	s := NewServer(provider)
+	if cfg.JWTSecret != "" {
+		s.jwtSecret = []byte(cfg.JWTSecret)
+		s.mux = s.buildMux()
+	}
+	for _, key := range cfg.AdminKeys {
+		s.keyStore.ImportKey(key, []string{"admin", "completion"})
+	}
+	for _, m := range cfg.Models {
+		s.modelReg.RegisterModel(m.Name, management.ModelInfo{Provider: m.Provider, Model: m.Model})
+	}
+	return s
+}
 
 // Start listens on addr (e.g. ":8080") and serves until the context is cancelled.
 func (s *Server) Start(ctx context.Context, addr string) error {
@@ -85,8 +110,8 @@ func (s *Server) buildMux() *http.ServeMux {
 	// Public endpoints.
 	mux.HandleFunc("GET /health", s.handleHealth)
 
-	// Authenticated LLM endpoints (require valid API key).
-	authed := auth.RequireAuth(s.keyStore)
+	// Authenticated LLM endpoints (require valid API key or JWT).
+	authed := auth.RequireAuth(s.keyStore, s.jwtSecret)
 	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
 	mux.Handle("POST /v1/chat/completions", authed(http.HandlerFunc(s.handleChatCompletion)))
 	mux.Handle("POST /v1/embeddings", authed(http.HandlerFunc(s.handleEmbeddings)))
@@ -188,6 +213,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
+	}
+
+	// Track per-key spend.
+	if cost, costErr := llmbridge.CompletionCost(resp); costErr == nil && cost > 0 {
+		apiKey := auth.APIKeyFromContext(ctx)
+		if apiKey != "" {
+			_ = s.keyStore.RecordSpend(apiKey, cost)
+		}
 	}
 
 	// Translate to OpenAI response format.

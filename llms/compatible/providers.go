@@ -9,6 +9,14 @@ const (
 	lmstudioDefaultModel = "local-model"
 	groqURL              = "https://api.groq.com/openai/v1/chat/completions"
 	togetherURL          = "https://api.together.xyz/v1/chat/completions"
+	deepseekURL          = "https://api.deepseek.com/v1/chat/completions"
+	perplexityURL        = "https://api.perplexity.ai/chat/completions"
+	fireworksURL         = "https://api.fireworks.ai/inference/v1/chat/completions"
+	cerebrasURL          = "https://api.cerebras.ai/v1/chat/completions"
+	sambanovaURL         = "https://api.sambanova.ai/v1/chat/completions"
+	mistralURL           = "https://api.mistral.ai/v1/chat/completions"
+	hyperbolicURL        = "https://api.hyperbolic.xyz/v1/chat/completions"
+	novitaURL            = "https://api.novita.ai/v3/openai/chat/completions"
 )
 
 // NewOllama returns a Provider for a local Ollama instance (default: localhost:11434).
@@ -70,4 +78,60 @@ func NewGroq(model, apiKey string) *openai.Provider {
 // open-source models. Get an API key at https://api.together.xyz
 func NewTogetherAI(model, apiKey string) *openai.Provider {
 	return openai.NewCompatible("together", togetherURL, apiKey, model)
+}
+
+// NewDeepSeek returns a Provider backed by DeepSeek.
+// Supports deepseek-chat and deepseek-coder models.
+// Get an API key at https://platform.deepseek.com
+func NewDeepSeek(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("deepseek", deepseekURL, apiKey, model)
+}
+
+// NewPerplexity returns a Provider backed by Perplexity AI.
+// Supports llama-3.1-sonar-* models with real-time web search.
+// Get an API key at https://www.perplexity.ai/settings/api
+func NewPerplexity(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("perplexity", perplexityURL, apiKey, model)
+}
+
+// NewFireworks returns a Provider backed by Fireworks AI, which hosts
+// many open-source models with fast inference.
+// Get an API key at https://fireworks.ai
+func NewFireworks(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("fireworks", fireworksURL, apiKey, model)
+}
+
+// NewCerebras returns a Provider backed by Cerebras, offering ultra-fast
+// Llama inference on dedicated silicon.
+// Get an API key at https://cloud.cerebras.ai
+func NewCerebras(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("cerebras", cerebrasURL, apiKey, model)
+}
+
+// NewSambaNova returns a Provider backed by SambaNova Cloud, optimized
+// for enterprise Llama deployments.
+// Get an API key at https://cloud.sambanova.ai
+func NewSambaNova(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("sambanova", sambanovaURL, apiKey, model)
+}
+
+// NewMistral returns a Provider backed by Mistral AI.
+// Supports mistral-large, mistral-small, codestral, and open models.
+// Get an API key at https://console.mistral.ai
+func NewMistral(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("mistral", mistralURL, apiKey, model)
+}
+
+// NewHyperbolic returns a Provider backed by Hyperbolic, hosting
+// open-source models including Llama, Qwen, and Mistral variants.
+// Get an API key at https://app.hyperbolic.xyz
+func NewHyperbolic(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("hyperbolic", hyperbolicURL, apiKey, model)
+}
+
+// NewNovitaAI returns a Provider backed by Novita AI, which hosts
+// hundreds of open-source models.
+// Get an API key at https://novita.ai
+func NewNovitaAI(model, apiKey string) *openai.Provider {
+	return openai.NewCompatible("novita", novitaURL, apiKey, model)
 }

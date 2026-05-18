@@ -4,7 +4,9 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 
 	"github.com/Vedanshu7/llmbridge/exceptions"
@@ -45,6 +47,59 @@ func (p *Provider) post(body []byte) (*chat.OAIResponse, error) {
 		return nil, exceptions.NewProviderError(p.name, 0, "API error: "+out.Error.Message, nil)
 	}
 	return &out, nil
+}
+
+// postURL sends a JSON body to the specified URL and returns the raw response bytes.
+func (p *Provider) postURL(url string, body []byte) ([]byte, error) {
+	return p.postURLContentType(url, body, "application/json")
+}
+
+// postURLContentType sends body with the given Content-Type and returns the raw response bytes.
+func (p *Provider) postURLContentType(url string, body []byte, contentType string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, err.Error(), err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, err.Error(), err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "read body: "+err.Error(), err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, exceptions.ClassifyHTTPError(p.name, resp.StatusCode, raw)
+	}
+	return raw, nil
+}
+
+// buildTranscribeForm builds a multipart/form-data body for the Whisper endpoint.
+func buildTranscribeForm(audio []byte, model, language, format string) ([]byte, string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	fw, err := w.CreateFormFile("file", "audio.mp3")
+	if err != nil {
+		return nil, "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := fw.Write(audio); err != nil {
+		return nil, "", fmt.Errorf("write audio: %w", err)
+	}
+	_ = w.WriteField("model", model)
+	if language != "" {
+		_ = w.WriteField("language", language)
+	}
+	if format != "" && format != "json" {
+		_ = w.WriteField("response_format", format)
+	}
+	w.Close()
+	return buf.Bytes(), w.FormDataContentType(), nil
 }
 
 // newStreamConn opens a streaming HTTP connection and returns the raw response.

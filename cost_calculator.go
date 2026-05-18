@@ -3,8 +3,12 @@ package llmbridge
 import (
 	"fmt"
 
-	openaiCost "github.com/Vedanshu7/llmbridge/llms/openai"
 	anthropicCost "github.com/Vedanshu7/llmbridge/llms/anthropic"
+	azureCost "github.com/Vedanshu7/llmbridge/llms/azure"
+	bedrockCost "github.com/Vedanshu7/llmbridge/llms/bedrock"
+	cohereCost "github.com/Vedanshu7/llmbridge/llms/cohere"
+	geminiCost "github.com/Vedanshu7/llmbridge/llms/gemini"
+	openaiCost "github.com/Vedanshu7/llmbridge/llms/openai"
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
@@ -20,9 +24,17 @@ func CompletionCost(resp *types.Response) (float64, error) {
 		return openaiCost.CostForResponse(resp)
 	case "anthropic":
 		return anthropicCost.CostForResponse(resp)
+	case "gemini":
+		return geminiCost.CostForResponse(resp)
+	case "azure":
+		return azureCost.CostForResponse(resp)
+	case "cohere":
+		return cohereCost.CostForResponse(resp)
+	case "bedrock":
+		return bedrockCost.CostForResponse(resp)
 	default:
-		// For OpenAI-compatible providers (groq, together, etc.) fall back to
-		// the model info DB if available.
+		// For OpenAI-compatible providers (groq, together, deepseek, etc.)
+		// fall back to the model info DB if available.
 		if info, ok := ModelInfoDB[resp.Model]; ok && resp.Usage != nil {
 			input := float64(resp.Usage.PromptTokens) * info.InputCostPerToken
 			output := float64(resp.Usage.CompletionTokens) * info.OutputCostPerToken

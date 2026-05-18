@@ -15,6 +15,7 @@ package llmbridge
 
 import (
 	"context"
+	"sync"
 
 	"github.com/Vedanshu7/llmbridge/exceptions"
 	"github.com/Vedanshu7/llmbridge/llms/base"
@@ -86,6 +87,51 @@ type ErrProvider = exceptions.ProviderError
 // AsyncResult wraps a Response and error for async operations.
 type AsyncResult = types.AsyncResult
 
+// BatchResult holds the outcome of one request in a BatchComplete call.
+type BatchResult = types.BatchResult
+
+// ImageRequest is the input to an image generation call.
+type ImageRequest = types.ImageRequest
+
+// ImageResponse is the output from an image generation call.
+type ImageResponse = types.ImageResponse
+
+// GeneratedImage is a single image returned by an image generation call.
+type GeneratedImage = types.GeneratedImage
+
+// TranscriptionRequest is the input to an audio transcription call.
+type TranscriptionRequest = types.TranscriptionRequest
+
+// TranscriptionResponse is the output from an audio transcription call.
+type TranscriptionResponse = types.TranscriptionResponse
+
+// RerankRequest is the input to a document reranking call.
+type RerankRequest = types.RerankRequest
+
+// RerankResponse is the output from a document reranking call.
+type RerankResponse = types.RerankResponse
+
+// RerankResult is a single ranked document in a RerankResponse.
+type RerankResult = types.RerankResult
+
+// TextRequest is the input to a legacy text completion call.
+type TextRequest = types.TextRequest
+
+// TextResponse is the output from a legacy text completion call.
+type TextResponse = types.TextResponse
+
+// ImageGenerator is the optional interface for image generation.
+type ImageGenerator = base.ImageGenerator
+
+// Transcriber is the optional interface for audio transcription.
+type Transcriber = base.Transcriber
+
+// Reranker is the optional interface for document reranking.
+type Reranker = base.Reranker
+
+// TextCompleter is the optional interface for legacy text completion.
+type TextCompleter = base.TextCompleter
+
 // Complete sends a blocking completion request using the given provider.
 // This is a package-level convenience wrapper around provider.Complete.
 func Complete(ctx context.Context, p Provider, req Request) (*Response, error) {
@@ -103,7 +149,44 @@ func AComplete(ctx context.Context, p Provider, req Request) <-chan AsyncResult 
 	return ch
 }
 
+// BatchComplete sends all requests concurrently and returns one BatchResult per request.
+// Results are ordered by their original index regardless of completion order.
+func BatchComplete(ctx context.Context, p Provider, reqs []Request) []BatchResult {
+	results := make([]BatchResult, len(reqs))
+	var wg sync.WaitGroup
+	for i, req := range reqs {
+		wg.Add(1)
+		go func(idx int, r Request) {
+			defer wg.Done()
+			resp, err := p.Complete(ctx, r)
+			results[idx] = BatchResult{Response: resp, Err: err, Index: idx}
+		}(i, req)
+	}
+	wg.Wait()
+	return results
+}
+
 // Embed generates vector embeddings using the given EmbedProvider.
 func Embed(ctx context.Context, p EmbedProvider, texts []string) ([][]float64, error) {
 	return p.Embed(ctx, texts)
+}
+
+// ImageGenerate generates images from a text prompt using the given ImageGenerator.
+func ImageGenerate(ctx context.Context, p ImageGenerator, req ImageRequest) (*ImageResponse, error) {
+	return p.ImageGenerate(ctx, req)
+}
+
+// Transcribe converts audio to text using the given Transcriber.
+func Transcribe(ctx context.Context, p Transcriber, req TranscriptionRequest) (*TranscriptionResponse, error) {
+	return p.Transcribe(ctx, req)
+}
+
+// Rerank reorders documents by relevance to a query using the given Reranker.
+func Rerank(ctx context.Context, p Reranker, req RerankRequest) (*RerankResponse, error) {
+	return p.Rerank(ctx, req)
+}
+
+// TextComplete sends a legacy (non-chat) text completion request.
+func TextComplete(ctx context.Context, p TextCompleter, req TextRequest) (*TextResponse, error) {
+	return p.TextComplete(ctx, req)
 }

@@ -44,3 +44,31 @@ type EmbedProvider interface {
 	// Name returns the provider identifier.
 	Name() string
 }
+
+// ImageGenerator is an optional interface for providers that support
+// generating images from text prompts (e.g. DALL-E).
+type ImageGenerator interface {
+	ImageGenerate(ctx context.Context, req types.ImageRequest) (*types.ImageResponse, error)
+	Name() string
+}
+
+// Transcriber is an optional interface for providers that support
+// converting audio to text (e.g. Whisper).
+type Transcriber interface {
+	Transcribe(ctx context.Context, req types.TranscriptionRequest) (*types.TranscriptionResponse, error)
+	Name() string
+}
+
+// Reranker is an optional interface for providers that support
+// reranking a list of documents given a query (e.g. Cohere Rerank).
+type Reranker interface {
+	Rerank(ctx context.Context, req types.RerankRequest) (*types.RerankResponse, error)
+	Name() string
+}
+
+// TextCompleter is an optional interface for providers that support
+// the legacy non-chat text completion endpoint.
+type TextCompleter interface {
+	TextComplete(ctx context.Context, req types.TextRequest) (*types.TextResponse, error)
+	Name() string
+}

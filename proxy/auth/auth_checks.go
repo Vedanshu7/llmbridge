@@ -1,27 +1,53 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"strings"
 )
 
+// ctxKeyAPIKey is the context key for the authenticated API key.
+type ctxKeyAPIKey struct{}
+
+// APIKeyFromContext returns the API key stored in the context by RequireAuth.
+func APIKeyFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyAPIKey{}).(string)
+	return v
+}
+
 // RequireAuth returns an http.Handler middleware that validates the
-// "Authorization: Bearer <key>" header against the store.
-// On failure it writes a 401 JSON response and does not call next.
-func RequireAuth(store *APIKeyStore) func(http.Handler) http.Handler {
+// "Authorization: Bearer <token>" header.
+//
+// Tokens are accepted if they:
+//  1. Match a stored API key in the store, OR
+//  2. Are valid HS256 JWTs signed with the optional jwtSecret (pass nil to disable JWT auth).
+func RequireAuth(store *APIKeyStore, jwtSecret ...[]byte) func(http.Handler) http.Handler {
+	var secret []byte
+	if len(jwtSecret) > 0 {
+		secret = jwtSecret[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := extractBearerToken(r)
-			if key == "" {
+			token := extractBearerToken(r)
+			if token == "" {
 				writeAuthError(w, "missing Authorization header")
 				return
 			}
-			_, ok := store.ValidateAPIKey(key)
-			if !ok {
-				writeAuthError(w, "invalid API key")
+			// Try API key first.
+			if _, ok := store.ValidateAPIKey(token); ok {
+				ctx := context.WithValue(r.Context(), ctxKeyAPIKey{}, token)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-			next.ServeHTTP(w, r)
+			// Try JWT if a secret is configured.
+			if len(secret) > 0 {
+				if _, err := Validate(token, secret); err == nil {
+					ctx := context.WithValue(r.Context(), ctxKeyAPIKey{}, token)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+			writeAuthError(w, "invalid API key or token")
 		})
 	}
 }

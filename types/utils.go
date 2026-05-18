@@ -11,6 +11,11 @@ const (
 	CallTypeAsyncCompletion CallType = "acompletion"
 	CallTypeStreaming        CallType = "streaming"
 	CallTypeEmbedding        CallType = "embedding"
+	CallTypeImageGeneration CallType = "image_generation"
+	CallTypeTranscription   CallType = "transcription"
+	CallTypeReranking       CallType = "reranking"
+	CallTypeTextCompletion  CallType = "text_completion"
+	CallTypeBatch           CallType = "batch"
 )
 
 // Request is the normalized, provider-agnostic input to any LLM.
@@ -191,6 +196,94 @@ type ProviderField struct {
 type AsyncResult struct {
 	Response *Response
 	Err      error
+}
+
+// BatchResult holds the outcome of one request in a BatchComplete call.
+type BatchResult struct {
+	Response *Response
+	Err      error
+	Index    int
+}
+
+// ImageRequest is the input to an image generation call.
+type ImageRequest struct {
+	Prompt   string
+	N        int
+	Size     string
+	Quality  string
+	Model    string
+	Provider string
+}
+
+// ImageResponse is the output from an image generation call.
+type ImageResponse struct {
+	Images   []GeneratedImage
+	Provider string
+	Model    string
+}
+
+// GeneratedImage is a single image returned by an image generation call.
+type GeneratedImage struct {
+	URL           string
+	B64JSON       string
+	RevisedPrompt string
+}
+
+// TranscriptionRequest is the input to an audio transcription call.
+type TranscriptionRequest struct {
+	AudioData []byte
+	Language  string
+	Model     string
+	Provider  string
+	Format    string // "json", "text", "srt", "vtt"
+}
+
+// TranscriptionResponse is the output from an audio transcription call.
+type TranscriptionResponse struct {
+	Text     string
+	Provider string
+	Model    string
+}
+
+// RerankRequest is the input to a document reranking call.
+type RerankRequest struct {
+	Query           string
+	Documents       []string
+	TopN            int
+	Model           string
+	Provider        string
+	ReturnDocuments bool
+}
+
+// RerankResponse is the output from a document reranking call.
+type RerankResponse struct {
+	Results  []RerankResult
+	Provider string
+	Model    string
+}
+
+// RerankResult is a single ranked document returned by a reranking call.
+type RerankResult struct {
+	Index    int
+	Document string
+	Score    float64
+}
+
+// TextRequest is the input to a legacy text completion call (non-chat).
+type TextRequest struct {
+	Prompt      string
+	MaxTokens   int
+	Temperature float64
+	Model       string
+	Provider    string
+}
+
+// TextResponse is the output from a legacy text completion call.
+type TextResponse struct {
+	Text     string
+	Provider string
+	Model    string
+	Usage    *UsageData
 }
 
 // LLM is the base interface every provider must satisfy.

@@ -105,6 +105,141 @@ func (p *Provider) Complete(ctx context.Context, req types.Request) (*types.Resp
 	return chat.FromOAIResponse(raw, p.name, wireReq.Model), nil
 }
 
+// ImageGenerate generates images using the DALL-E API.
+func (p *Provider) ImageGenerate(ctx context.Context, req types.ImageRequest) (*types.ImageResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = "dall-e-3"
+	}
+	n := req.N
+	if n <= 0 {
+		n = 1
+	}
+	size := req.Size
+	if size == "" {
+		size = "1024x1024"
+	}
+	wireReq := map[string]interface{}{
+		"model":  model,
+		"prompt": req.Prompt,
+		"n":      n,
+		"size":   size,
+	}
+	if req.Quality != "" {
+		wireReq["quality"] = req.Quality
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postURL("https://api.openai.com/v1/images/generations", body)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Data []struct {
+			URL           string `json:"url"`
+			B64JSON       string `json:"b64_json"`
+			RevisedPrompt string `json:"revised_prompt"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "parse image response: "+err.Error(), err)
+	}
+	images := make([]types.GeneratedImage, len(result.Data))
+	for i, d := range result.Data {
+		images[i] = types.GeneratedImage{
+			URL:           d.URL,
+			B64JSON:       d.B64JSON,
+			RevisedPrompt: d.RevisedPrompt,
+		}
+	}
+	return &types.ImageResponse{Images: images, Provider: p.name, Model: model}, nil
+}
+
+// Transcribe converts audio to text using the Whisper API.
+// AudioData must be the raw bytes of a supported audio file (mp3, mp4, wav, webm, etc.).
+func (p *Provider) Transcribe(ctx context.Context, req types.TranscriptionRequest) (*types.TranscriptionResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = "whisper-1"
+	}
+	format := req.Format
+	if format == "" {
+		format = "json"
+	}
+	// Build multipart form.
+	body, contentType, err := buildTranscribeForm(req.AudioData, model, req.Language, format)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "build form: "+err.Error(), err)
+	}
+	raw, err := p.postURLContentType("https://api.openai.com/v1/audio/transcriptions", body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if format == "text" {
+		return &types.TranscriptionResponse{Text: string(raw), Provider: p.name, Model: model}, nil
+	}
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "parse transcription: "+err.Error(), err)
+	}
+	return &types.TranscriptionResponse{Text: result.Text, Provider: p.name, Model: model}, nil
+}
+
+// TextComplete sends a legacy (non-chat) text completion request.
+func (p *Provider) TextComplete(ctx context.Context, req types.TextRequest) (*types.TextResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = p.model
+	}
+	wireReq := map[string]interface{}{
+		"model":  model,
+		"prompt": req.Prompt,
+	}
+	if req.MaxTokens > 0 {
+		wireReq["max_tokens"] = req.MaxTokens
+	}
+	if req.Temperature > 0 {
+		wireReq["temperature"] = req.Temperature
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postURL("https://api.openai.com/v1/completions", body)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "parse text completion: "+err.Error(), err)
+	}
+	out := &types.TextResponse{Provider: p.name, Model: model}
+	if len(result.Choices) > 0 {
+		out.Text = result.Choices[0].Text
+	}
+	if result.Usage != nil {
+		out.Usage = &types.UsageData{
+			PromptTokens:     result.Usage.PromptTokens,
+			CompletionTokens: result.Usage.CompletionTokens,
+			TotalTokens:      result.Usage.TotalTokens,
+		}
+	}
+	return out, nil
+}
+
 // Stream implements base.Streamer for token-by-token output via SSE.
 func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.Delta, error) {
 	wireReq := chat.ToOAIRequest(req, p.model, true)

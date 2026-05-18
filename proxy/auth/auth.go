@@ -4,16 +4,19 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 )
 
 // KeyInfo holds metadata about an API key.
 type KeyInfo struct {
-	Key       string
-	CreatedAt time.Time
-	LastUsed  time.Time
-	Scopes    []string
+	Key          string
+	CreatedAt    time.Time
+	LastUsed     time.Time
+	Scopes       []string
+	SpendLimit   float64 // 0 = unlimited
+	CurrentSpend float64 // accumulated spend in USD
 }
 
 // APIKeyStore is a thread-safe in-memory store of API keys.
@@ -73,6 +76,43 @@ func (s *APIKeyStore) ListKeys() []*KeyInfo {
 		out = append(out, k)
 	}
 	return out
+}
+
+// ImportKey stores an existing API key (e.g. loaded from a config file).
+func (s *APIKeyStore) ImportKey(key string, scopes []string) {
+	s.mu.Lock()
+	s.keys[key] = &KeyInfo{
+		Key:       key,
+		CreatedAt: time.Now(),
+		Scopes:    scopes,
+	}
+	s.mu.Unlock()
+}
+
+// SetSpendLimit sets the maximum USD spend allowed for key.
+func (s *APIKeyStore) SetSpendLimit(key string, limit float64) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.SpendLimit = limit
+	}
+	s.mu.Unlock()
+}
+
+// RecordSpend adds cost to the key's current spend.
+// Returns an error string if the key's spend limit is exceeded.
+func (s *APIKeyStore) RecordSpend(key string, cost float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.keys[key]
+	if !ok {
+		return nil
+	}
+	info.CurrentSpend += cost
+	if info.SpendLimit > 0 && info.CurrentSpend > info.SpendLimit {
+		return fmt.Errorf("key %s exceeded spend limit: $%.6f of $%.6f",
+			key, info.CurrentSpend, info.SpendLimit)
+	}
+	return nil
 }
 
 // HasScope returns true if key has the given scope or the "admin" scope.
