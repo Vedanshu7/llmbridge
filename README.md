@@ -1,6 +1,6 @@
 # llmbridge
 
-A unified Go interface to multiple LLM providers. The Go equivalent of Python's LiteLLM.
+A unified Go interface to multiple LLM providers.
 
 Switch between OpenAI, Anthropic, Ollama, LM Studio, Groq, or any OpenAI-compatible
 endpoint by changing one line. Your application code never changes.
