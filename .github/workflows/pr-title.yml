@@ -1,0 +1,57 @@
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Conventional Commits format
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Allowed types (maps to Conventional Commits)
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            test
+            chore
+          # Allow scopes like (llms), (proxy), (router), etc.
+          requireScope: false
+          # Minimum title length after the prefix
+          subjectPattern: ^[A-Z]?.+$
+          subjectPatternError: |
+            The subject "{subject}" doesn't match the required pattern.
+            Keep it short and descriptive (e.g. "feat: add Gemini provider").
+
+  validate-branch:
+    name: Validate branch name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch naming convention
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          PATTERN="^(feat|fix|docs|refactor|test|chore)/.+"
+          if [[ ! "$BRANCH" =~ $PATTERN ]]; then
+            echo "FAIL: Branch name '$BRANCH' does not follow the convention."
+            echo ""
+            echo "Required pattern: <type>/<short-description>"
+            echo "Examples:"
+            echo "  feat/gemini-provider"
+            echo "  fix/anthropic-tool-merge"
+            echo "  docs/proxy-quickstart"
+            echo "  refactor/router-strategies"
+            echo ""
+            echo "Allowed types: feat, fix, docs, refactor, test, chore"
+            exit 1
+          fi
+          echo "OK: Branch name '$BRANCH' is valid."

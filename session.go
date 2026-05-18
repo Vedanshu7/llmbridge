@@ -9,17 +9,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/Vedanshu7/llmbridge/types"
 )
 
-// Session stores a conversation history that can be saved to disk and
-// resumed in future processes, just like claude --continue.
+// Session stores a conversation history that can be saved to disk and resumed
+// in future processes, similar to claude --continue.
 type Session struct {
-	ID        string    `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
+	ID        string         `json:"id"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	Provider  string         `json:"provider"`
+	Model     string         `json:"model"`
+	Messages  []types.Message `json:"messages"`
 }
 
 // NewSession creates an empty session for the given provider and model.
@@ -34,7 +36,7 @@ func NewSession(providerName, model string) *Session {
 }
 
 // Add appends a message to the session and updates UpdatedAt.
-func (s *Session) Add(msg Message) {
+func (s *Session) Add(msg types.Message) {
 	s.Messages = append(s.Messages, msg)
 	s.UpdatedAt = time.Now()
 }
@@ -58,7 +60,6 @@ func (s *Session) Save() error {
 		return fmt.Errorf("session write: %w", err)
 	}
 
-	// Overwrite the "latest" pointer file with the session ID.
 	latestPath := filepath.Join(dir, "latest")
 	return os.WriteFile(latestPath, []byte(s.ID), 0600)
 }
@@ -125,7 +126,6 @@ func ListSessions() ([]*Session, error) {
 		sessions = append(sessions, s)
 	}
 
-	// Sort newest first.
 	for i := 1; i < len(sessions); i++ {
 		for j := i; j > 0 && sessions[j].CreatedAt.After(sessions[j-1].CreatedAt); j-- {
 			sessions[j], sessions[j-1] = sessions[j-1], sessions[j]
@@ -134,10 +134,6 @@ func ListSessions() ([]*Session, error) {
 	return sessions, nil
 }
 
-// sessionDir returns the platform-appropriate directory for session files.
-//
-//	macOS/Linux: ~/.llmbridge/sessions
-//	Windows:     %APPDATA%\llmbridge\sessions
 func sessionDir() (string, error) {
 	var base string
 	if runtime.GOOS == "windows" {

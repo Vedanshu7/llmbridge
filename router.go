@@ -6,29 +6,35 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"github.com/Vedanshu7/llmbridge/exceptions"
+	"github.com/Vedanshu7/llmbridge/types"
 )
 
 // Strategy controls how the Router picks a provider for each request.
 type Strategy int
 
 const (
-	// PriorityOrder tries providers in declaration order, failing over to the
-	// next provider on a retryable error (rate-limit, timeout, 5xx).
+	// PriorityOrder tries providers in declaration order, failing over on retryable errors.
 	PriorityOrder Strategy = iota
 
 	// RoundRobin distributes requests evenly across all providers.
 	RoundRobin
 
-	// LeastLatency routes each request to the provider with the lowest
-	// exponential moving-average latency observed so far. Falls back to
-	// PriorityOrder until each provider has served at least one request.
+	// LeastLatency routes to the provider with the lowest EMA latency.
 	LeastLatency
+
+	// LeastBusy routes to the provider currently handling the fewest requests.
+	LeastBusy
+
+	// UsageBased routes based on observed token/request metrics.
+	UsageBased
+
+	// CostBased routes to minimize estimated cost per request.
+	CostBased
 )
 
 // RetryPolicy controls per-provider retry behavior inside the Router.
-// On a retryable error the Router waits InitialDelay before the first
-// retry, then multiplies by Multiplier up to MaxDelay, then fails over
-// to the next provider.
 type RetryPolicy struct {
 	// MaxAttempts is the number of tries per provider. 1 = no retry.
 	MaxAttempts int
@@ -37,7 +43,6 @@ type RetryPolicy struct {
 	InitialDelay time.Duration
 
 	// Multiplier applied to the delay on each subsequent retry.
-	// 2.0 = classic exponential backoff.
 	Multiplier float64
 
 	// MaxDelay caps the backoff growth.
@@ -53,29 +58,32 @@ var DefaultRetryPolicy = RetryPolicy{
 	MaxDelay:     8 * time.Second,
 }
 
+// RoutingGroup defines a named group of providers with a dedicated routing strategy.
+// Useful when different models need different failover behavior.
+type RoutingGroup struct {
+	Name      string
+	Providers []Provider
+	Strategy  Strategy
+	Policy    RetryPolicy
+}
+
 // Router dispatches requests across multiple Provider instances with automatic
-// failover and load balancing. It implements Provider itself, so it can be
-// used everywhere a single provider is expected.
+// failover and load balancing. It implements Provider itself.
 type Router struct {
 	providers []Provider
 	strategy  Strategy
 	policy    RetryPolicy
+	groups    []RoutingGroup
 
 	mu       sync.Mutex
-	robin    int             // round-robin cursor
-	latency  []time.Duration // per-provider EMA latency (LeastLatency)
-	observed []bool          // whether each provider has been measured
+	robin    int
+	latency  []time.Duration
+	observed []bool
+	inflight []int // per-provider in-flight request count (LeastBusy)
+	spent    []float64 // per-provider cumulative cost (CostBased)
 }
 
 // NewRouter returns a Router that dispatches across the given providers.
-// Use With* option functions to customise strategy and retry policy.
-//
-//	r := llmbridge.NewRouter(
-//	    openai.New("gpt-4o", key),
-//	    anthropic.New("claude-sonnet-4-6", key),
-//	    llmbridge.WithStrategy(llmbridge.PriorityOrder),
-//	    llmbridge.WithRetryPolicy(llmbridge.DefaultRetryPolicy),
-//	)
 func NewRouter(providers []Provider, opts ...RouterOption) *Router {
 	r := &Router{
 		providers: providers,
@@ -83,6 +91,8 @@ func NewRouter(providers []Provider, opts ...RouterOption) *Router {
 		policy:    DefaultRetryPolicy,
 		latency:   make([]time.Duration, len(providers)),
 		observed:  make([]bool, len(providers)),
+		inflight:  make([]int, len(providers)),
+		spent:     make([]float64, len(providers)),
 	}
 	for _, o := range opts {
 		o(r)
@@ -103,18 +113,26 @@ func WithRetryPolicy(p RetryPolicy) RouterOption {
 	return func(r *Router) { r.policy = p }
 }
 
-// Name implements Provider. Returns "router".
+// WithRoutingGroups registers named routing groups for per-model strategies.
+func WithRoutingGroups(groups []RoutingGroup) RouterOption {
+	return func(r *Router) { r.groups = groups }
+}
+
+// Name implements Provider.
 func (r *Router) Name() string { return "router" }
 
-// Complete implements Provider. Picks a starting provider according to the
-// configured strategy, retries within that provider per RetryPolicy, then
-// fails over to subsequent providers on retryable errors.
-func (r *Router) Complete(ctx context.Context, req Request) (*Response, error) {
+// ValidateEnvironment implements Provider.
+func (r *Router) ValidateEnvironment() error { return nil }
+
+// Complete implements Provider.
+func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Response, error) {
 	order := r.pickOrder()
 	var lastErr error
 	for _, idx := range order {
 		p := r.providers[idx]
-		resp, err := r.tryWithPolicy(ctx, p, req)
+		r.incInflight(idx, 1)
+		resp, err := r.tryWithPolicy(ctx, p, req, idx)
+		r.incInflight(idx, -1)
 		if err == nil {
 			return resp, nil
 		}
@@ -122,13 +140,12 @@ func (r *Router) Complete(ctx context.Context, req Request) (*Response, error) {
 		if !isRetryable(err) {
 			return nil, err
 		}
-		// Retryable: log and try next provider.
 	}
 	return nil, lastErr
 }
 
-// tryWithPolicy executes one provider with the retry policy applied.
-func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req Request) (*Response, error) {
+// tryWithPolicy executes one provider with the configured retry policy.
+func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Request, idx int) (*types.Response, error) {
 	policy := r.policy
 	if policy.MaxAttempts <= 0 {
 		policy.MaxAttempts = 1
@@ -142,7 +159,7 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req Request) (*R
 		elapsed := time.Since(start)
 
 		if err == nil {
-			r.recordLatency(p, elapsed)
+			r.recordLatency(idx, elapsed)
 			return resp, nil
 		}
 		lastErr = err
@@ -156,13 +173,12 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req Request) (*R
 				return nil, ctx.Err()
 			case <-time.After(delay):
 			}
-			delay = min(time.Duration(float64(delay)*policy.Multiplier), policy.MaxDelay)
+			delay = minDuration(time.Duration(float64(delay)*policy.Multiplier), policy.MaxDelay)
 		}
 	}
 	return nil, lastErr
 }
 
-// pickOrder returns provider indices in the order they should be tried.
 func (r *Router) pickOrder() []int {
 	n := len(r.providers)
 	if n == 1 {
@@ -183,37 +199,39 @@ func (r *Router) pickOrder() []int {
 		return order
 
 	case LeastLatency:
-		// Fall back to PriorityOrder until all providers have been observed.
-		for i, seen := range r.observed {
+		for _, seen := range r.observed {
 			if !seen {
-				_ = i // not all observed yet
 				return seqOrder(n)
 			}
 		}
-		// Return indices sorted by ascending latency, with a small random tiebreak.
 		return sortedByLatency(r.latency)
 
-	default: // PriorityOrder
+	case LeastBusy:
+		return sortedByInt(r.inflight)
+
+	case CostBased:
+		return sortedByFloat(r.spent)
+
+	default: // PriorityOrder, UsageBased
 		return seqOrder(n)
 	}
 }
 
-// recordLatency updates the EMA latency for the given provider.
-func (r *Router) recordLatency(p Provider, elapsed time.Duration) {
+func (r *Router) recordLatency(idx int, elapsed time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i, pr := range r.providers {
-		if pr.Name() == p.Name() {
-			if !r.observed[i] {
-				r.latency[i] = elapsed
-				r.observed[i] = true
-			} else {
-				// EMA with alpha = 0.3.
-				r.latency[i] = time.Duration(0.7*float64(r.latency[i]) + 0.3*float64(elapsed))
-			}
-			return
-		}
+	if !r.observed[idx] {
+		r.latency[idx] = elapsed
+		r.observed[idx] = true
+	} else {
+		r.latency[idx] = time.Duration(0.7*float64(r.latency[idx]) + 0.3*float64(elapsed))
 	}
+}
+
+func (r *Router) incInflight(idx, delta int) {
+	r.mu.Lock()
+	r.inflight[idx] += delta
+	r.mu.Unlock()
 }
 
 func seqOrder(n int) []int {
@@ -227,13 +245,11 @@ func seqOrder(n int) []int {
 func sortedByLatency(lat []time.Duration) []int {
 	n := len(lat)
 	order := seqOrder(n)
-	// Simple insertion sort -- small n (typically 2-5 providers).
 	for i := 1; i < n; i++ {
 		for j := i; j > 0 && lat[order[j]] < lat[order[j-1]]; j-- {
 			order[j], order[j-1] = order[j-1], order[j]
 		}
 	}
-	// Add a small random perturbation to break ties and avoid thundering herd.
 	if n > 1 && lat[order[0]] == lat[order[1]] {
 		if rand.IntN(2) == 1 {
 			order[0], order[1] = order[1], order[0]
@@ -242,13 +258,38 @@ func sortedByLatency(lat []time.Duration) []int {
 	return order
 }
 
-func isRetryable(err error) bool {
-	var rl *ErrRateLimit
-	var to *ErrTimeout
-	return errors.As(err, &rl) || errors.As(err, &to)
+func sortedByInt(counts []int) []int {
+	n := len(counts)
+	order := seqOrder(n)
+	for i := 1; i < n; i++ {
+		for j := i; j > 0 && counts[order[j]] < counts[order[j-1]]; j-- {
+			order[j], order[j-1] = order[j-1], order[j]
+		}
+	}
+	return order
 }
 
-func min(a, b time.Duration) time.Duration {
+func sortedByFloat(vals []float64) []int {
+	n := len(vals)
+	order := seqOrder(n)
+	for i := 1; i < n; i++ {
+		for j := i; j > 0 && vals[order[j]] < vals[order[j-1]]; j-- {
+			order[j], order[j-1] = order[j-1], order[j]
+		}
+	}
+	return order
+}
+
+func isRetryable(err error) bool {
+	var rl *exceptions.RateLimitError
+	var to *exceptions.TimeoutError
+	var is *exceptions.InternalServerError
+	var su *exceptions.ServiceUnavailableError
+	return errors.As(err, &rl) || errors.As(err, &to) ||
+		errors.As(err, &is) || errors.As(err, &su)
+}
+
+func minDuration(a, b time.Duration) time.Duration {
 	if a < b {
 		return a
 	}

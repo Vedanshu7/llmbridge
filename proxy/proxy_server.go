@@ -1,0 +1,356 @@
+// Package proxy implements an OpenAI-compatible HTTP proxy server that
+// dispatches requests to any llmbridge Provider backend.
+//
+// Endpoints:
+//
+//	GET  /health                   — liveness check
+//	GET  /v1/models                — list registered models
+//	POST /v1/chat/completions      — chat completion (streaming supported)
+//	POST /v1/embeddings            — embedding generation
+//	POST /admin/key/generate       — create API key     (admin scope)
+//	DELETE /admin/key/delete       — delete API key     (admin scope)
+//	GET  /admin/keys               — list API keys      (admin scope)
+//	GET  /admin/models             — list models        (admin scope)
+//	POST /admin/models             — register a model   (admin scope)
+//	POST /admin/router             — deploy router cfg  (admin scope)
+//	GET  /admin/router             — list router cfgs   (admin scope)
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+
+	"github.com/Vedanshu7/llmbridge/llms/base"
+	"github.com/Vedanshu7/llmbridge/proxy/auth"
+	"github.com/Vedanshu7/llmbridge/proxy/management"
+	"github.com/Vedanshu7/llmbridge/types"
+)
+
+// Server is the OpenAI-compatible proxy HTTP server.
+type Server struct {
+	provider  base.LLM
+	keyStore  *auth.APIKeyStore
+	modelReg  *management.ModelRegistry
+	routerCfg *management.RouterConfig
+	mux       *http.ServeMux
+}
+
+// NewServer constructs a Server backed by the given LLM provider.
+// Pass a *llmbridge.Router as the provider to get multi-backend routing.
+func NewServer(provider base.LLM) *Server {
+	s := &Server{
+		provider:  provider,
+		keyStore:  auth.NewAPIKeyStore(),
+		modelReg:  management.NewModelRegistry(),
+		routerCfg: management.NewRouterConfig(),
+	}
+	s.mux = s.buildMux()
+	return s
+}
+
+// KeyStore returns the server's API key store, allowing callers to
+// pre-populate keys before the server starts.
+func (s *Server) KeyStore() *auth.APIKeyStore { return s.keyStore }
+
+// Start listens on addr (e.g. ":8080") and serves until the context is cancelled.
+func (s *Server) Start(ctx context.Context, addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("proxy: listen %s: %w", addr, err)
+	}
+	srv := &http.Server{Handler: s.mux}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Shutdown(context.Background())
+	}()
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("proxy: serve: %w", err)
+	}
+	return nil
+}
+
+// ServeHTTP implements http.Handler, allowing the Server to be embedded in
+// tests or other frameworks.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) buildMux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// Public endpoints.
+	mux.HandleFunc("GET /health", s.handleHealth)
+
+	// Authenticated LLM endpoints (require valid API key).
+	authed := auth.RequireAuth(s.keyStore)
+	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
+	mux.Handle("POST /v1/chat/completions", authed(http.HandlerFunc(s.handleChatCompletion)))
+	mux.Handle("POST /v1/embeddings", authed(http.HandlerFunc(s.handleEmbeddings)))
+
+	// Admin endpoints (require "admin" scope).
+	admin := auth.RequireScope(s.keyStore, "admin")
+	km := management.NewKeyManagement(s.keyStore)
+	mux.Handle("POST /admin/key/generate", admin(http.HandlerFunc(km.HandleGenerate)))
+	mux.Handle("DELETE /admin/key/delete", admin(http.HandlerFunc(km.HandleDelete)))
+	mux.Handle("GET /admin/keys", admin(http.HandlerFunc(km.HandleList)))
+	mux.Handle("GET /admin/models", admin(http.HandlerFunc(s.modelReg.HandleList)))
+	mux.Handle("POST /admin/models", admin(http.HandlerFunc(s.modelReg.HandleRegister)))
+	mux.Handle("POST /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleDeploy)))
+	mux.Handle("GET /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleList)))
+
+	return mux
+}
+
+// ---- Handler implementations ----
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	type modelObj struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
+	}
+	models := s.modelReg.ListModels()
+	var data []modelObj
+	for name := range models {
+		data = append(data, modelObj{ID: name, Object: "model", OwnedBy: "llmbridge"})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+// openAIChatRequest is the subset of the OpenAI chat completions request we parse.
+type openAIChatRequest struct {
+	Model       string             `json:"model"`
+	Messages    []openAIMessage    `json:"messages"`
+	Temperature float64            `json:"temperature"`
+	MaxTokens   int                `json:"max_tokens"`
+	Stream      bool               `json:"stream"`
+	Tools       []openAIToolDef    `json:"tools,omitempty"`
+}
+
+type openAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openAIToolDef struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Parameters  map[string]interface{} `json:"parameters"`
+	} `json:"function"`
+}
+
+func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
+	var oaiReq openAIChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&oaiReq); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse request body")
+		return
+	}
+
+	// Translate to types.Request.
+	req := types.Request{
+		Model:       oaiReq.Model,
+		Temperature: oaiReq.Temperature,
+		MaxTokens:   oaiReq.MaxTokens,
+		Stream:      oaiReq.Stream,
+	}
+	for _, m := range oaiReq.Messages {
+		if m.Role == "system" {
+			req.System = m.Content
+		} else {
+			req.Messages = append(req.Messages, types.Message{
+				Role:    m.Role,
+				Content: m.Content,
+			})
+		}
+	}
+
+	ctx := r.Context()
+
+	if oaiReq.Stream {
+		s.streamChatCompletion(w, r, ctx, req)
+		return
+	}
+
+	resp, err := s.provider.Complete(ctx, req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	// Translate to OpenAI response format.
+	writeJSON(w, http.StatusOK, buildOAIResponse(resp))
+}
+
+func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ctx context.Context, req types.Request) {
+	streamer, ok := s.provider.(base.Streamer)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"provider does not support streaming")
+		return
+	}
+
+	ch, err := streamer.Stream(ctx, req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "server_error", "streaming not supported by transport")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	for delta := range ch {
+		if delta.Err != nil {
+			_, _ = io.WriteString(w, "data: {\"error\":\""+delta.Err.Error()+"\"}\n\n")
+			flusher.Flush()
+			return
+		}
+		if delta.Done {
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+		chunk := buildOAIStreamChunk(delta)
+		b, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+}
+
+func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	embedder, ok := s.provider.(base.EmbedProvider)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"provider does not support embeddings")
+		return
+	}
+
+	var body struct {
+		Input []string `json:"input"`
+		Model string   `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse request body")
+		return
+	}
+
+	vecs, err := embedder.Embed(r.Context(), body.Input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	type embeddingObj struct {
+		Object    string    `json:"object"`
+		Embedding []float64 `json:"embedding"`
+		Index     int       `json:"index"`
+	}
+	data := make([]embeddingObj, len(vecs))
+	for i, v := range vecs {
+		data[i] = embeddingObj{Object: "embedding", Embedding: v, Index: i}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"object": "list",
+		"data":   data,
+		"model":  body.Model,
+	})
+}
+
+// ---- Response builders ----
+
+func buildOAIResponse(resp *types.Response) map[string]interface{} {
+	msg := map[string]interface{}{
+		"role":    "assistant",
+		"content": resp.Content,
+	}
+	if len(resp.ToolCalls) > 0 {
+		tcs := make([]map[string]interface{}, len(resp.ToolCalls))
+		for i, tc := range resp.ToolCalls {
+			tcs[i] = map[string]interface{}{
+				"id":   tc.ID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      tc.Name,
+					"arguments": tc.Arguments,
+				},
+			}
+		}
+		msg["tool_calls"] = tcs
+	}
+
+	choice := map[string]interface{}{
+		"index":         0,
+		"message":       msg,
+		"finish_reason": "stop",
+	}
+	out := map[string]interface{}{
+		"object":  "chat.completion",
+		"model":   resp.Model,
+		"choices": []interface{}{choice},
+	}
+	if resp.Usage != nil {
+		out["usage"] = map[string]int{
+			"prompt_tokens":     resp.Usage.PromptTokens,
+			"completion_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+		}
+	}
+	return out
+}
+
+func buildOAIStreamChunk(d types.Delta) map[string]interface{} {
+	delta := map[string]interface{}{"content": d.Content}
+	if d.ToolCall != nil {
+		delta["tool_calls"] = []map[string]interface{}{
+			{
+				"id":   d.ToolCall.ID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      d.ToolCall.Name,
+					"arguments": d.ToolCall.Arguments,
+				},
+			},
+		}
+	}
+	return map[string]interface{}{
+		"object":  "chat.completion.chunk",
+		"choices": []interface{}{map[string]interface{}{"index": 0, "delta": delta}},
+	}
+}
+
+// ---- Helpers ----
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, errType, msg string) {
+	writeJSON(w, status, map[string]interface{}{
+		"error": map[string]string{
+			"message": msg,
+			"type":    errType,
+		},
+	})
+}

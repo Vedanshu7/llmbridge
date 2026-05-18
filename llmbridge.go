@@ -13,134 +13,97 @@
 //	})
 package llmbridge
 
-import "context"
+import (
+	"context"
+
+	"github.com/Vedanshu7/llmbridge/exceptions"
+	"github.com/Vedanshu7/llmbridge/llms/base"
+	"github.com/Vedanshu7/llmbridge/types"
+)
+
+// Type aliases — all existing llmbridge.X names remain valid without change.
 
 // Provider is the unified interface every LLM backend must satisfy.
-type Provider interface {
-	// Complete sends a request and returns the full response.
-	Complete(ctx context.Context, req Request) (*Response, error)
+type Provider = base.LLM
 
-	// Name returns the provider identifier (e.g. "openai", "anthropic", "ollama").
-	Name() string
-}
+// Streamer is the optional interface for token-by-token streaming.
+type Streamer = base.Streamer
+
+// EmbedProvider is the optional interface for embedding generation.
+type EmbedProvider = base.EmbedProvider
 
 // Request is the normalized, provider-agnostic input to any LLM.
-type Request struct {
-	// System is the system prompt. Passed as a top-level field on providers
-	// that support it (Anthropic), or as a system-role message on others.
-	System string
-
-	// Messages is the conversation history.
-	Messages []Message
-
-	// Tools is the set of functions the model can call.
-	// Leave nil to disable tool use.
-	Tools []Tool
-
-	// Model overrides the provider's default model for this request.
-	// Leave empty to use the provider default.
-	Model string
-
-	// MaxTokens caps the response length. 0 uses the provider default.
-	MaxTokens int
-
-	// Temperature controls randomness. 0 = deterministic.
-	Temperature float64
-}
+type Request = types.Request
 
 // Response is the normalized output from any provider.
-type Response struct {
-	// Content is the text content of the reply, if any.
-	Content string
-
-	// ToolCalls lists the tool invocations the model requested, if any.
-	// When non-empty, the caller should execute the tools and send results
-	// back as tool-role Messages in the next Request.
-	ToolCalls []ToolCall
-}
+type Response = types.Response
 
 // Message is a single turn in a conversation.
-type Message struct {
-	// Role is one of: "user", "assistant", "tool".
-	Role string
-
-	// Content is the text content of the message.
-	Content string
-
-	// ToolCallID is the ID linking a "tool" role message to the ToolCall
-	// that requested it. Required when Role == "tool".
-	ToolCallID string
-
-	// ToolCalls lists tool invocations requested by an "assistant" message.
-	ToolCalls []ToolCall
-}
+type Message = types.Message
 
 // ToolCall is a single tool invocation requested by the model.
-type ToolCall struct {
-	// ID is the opaque identifier the model assigned. Must be echoed back
-	// in the tool result message's ToolCallID.
-	ID string
-
-	// Name is the tool name from the Tools list.
-	Name string
-
-	// Arguments is the raw JSON object of tool inputs.
-	Arguments string
-}
+type ToolCall = types.ToolCall
 
 // Tool defines a function the model can invoke.
-type Tool struct {
-	Name        string
-	Description string
-	Parameters  Schema
-}
+type Tool = types.Tool
 
 // Schema is the JSON Schema definition of tool parameters.
-type Schema struct {
-	// Type is always "object" for tool parameters.
-	Type string
-
-	// Properties maps parameter names to their definitions.
-	Properties map[string]Property
-
-	// Required lists the names of mandatory parameters.
-	Required []string
-}
+type Schema = types.Schema
 
 // Property is a single parameter in a Schema.
-type Property struct {
-	Type        string
-	Description string
-	// Enum restricts valid values. Leave nil for free-form input.
-	Enum []string
-}
-
-// Streamer is an optional interface that providers may implement to support
-// token-by-token streaming responses. Use a type assertion to check availability:
-//
-//	if s, ok := provider.(llmbridge.Streamer); ok {
-//	    ch, err := s.Stream(ctx, req)
-//	}
-//
-// The returned channel is closed when the stream ends. A final Delta with
-// Done == true signals clean completion; Err != nil signals failure.
-type Streamer interface {
-	Stream(ctx context.Context, req Request) (<-chan Delta, error)
-}
+type Property = types.Property
 
 // Delta is a single token or structured fragment emitted during streaming.
-// Accumulate Content fields to reconstruct the full response text.
-type Delta struct {
-	// Content is a text fragment to append to the response so far.
-	Content string
+type Delta = types.Delta
 
-	// ToolCall carries a partial or complete tool-call update.
-	// Non-nil when the model is streaming a function invocation.
-	ToolCall *ToolCall
+// ModelInfo describes the capabilities and pricing of a specific model.
+type ModelInfo = types.ModelInfo
 
-	// Done is true on the final Delta. Content and ToolCall are empty.
-	Done bool
+// UsageData holds token consumption metrics.
+type UsageData = types.UsageData
 
-	// Err is non-nil if the stream terminated with an error.
-	Err error
+// CallType identifies the kind of LLM operation.
+type CallType = types.CallType
+
+// Error type aliases for backward compatibility.
+
+// ErrAuth indicates an authentication or authorization failure.
+// Deprecated: use exceptions.AuthenticationError directly.
+type ErrAuth = exceptions.AuthenticationError
+
+// ErrRateLimit indicates the provider throttled the request.
+// Deprecated: use exceptions.RateLimitError directly.
+type ErrRateLimit = exceptions.RateLimitError
+
+// ErrTimeout indicates the request exceeded the HTTP deadline.
+// Deprecated: use exceptions.TimeoutError directly.
+type ErrTimeout = exceptions.TimeoutError
+
+// ErrProvider wraps a provider-level failure.
+// Deprecated: use exceptions.ProviderError directly.
+type ErrProvider = exceptions.ProviderError
+
+// AsyncResult wraps a Response and error for async operations.
+type AsyncResult = types.AsyncResult
+
+// Complete sends a blocking completion request using the given provider.
+// This is a package-level convenience wrapper around provider.Complete.
+func Complete(ctx context.Context, p Provider, req Request) (*Response, error) {
+	return p.Complete(ctx, req)
+}
+
+// AComplete sends a completion request asynchronously and returns a channel
+// that will receive exactly one AsyncResult.
+func AComplete(ctx context.Context, p Provider, req Request) <-chan AsyncResult {
+	ch := make(chan AsyncResult, 1)
+	go func() {
+		resp, err := p.Complete(ctx, req)
+		ch <- AsyncResult{Response: resp, Err: err}
+	}()
+	return ch
+}
+
+// Embed generates vector embeddings using the given EmbedProvider.
+func Embed(ctx context.Context, p EmbedProvider, texts []string) ([][]float64, error) {
+	return p.Embed(ctx, texts)
 }

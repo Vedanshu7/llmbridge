@@ -1,14 +1,6 @@
-// Package local provides llmbridge.Provider implementations for self-hosted
-// and locally-run LLMs: Ollama, LM Studio, Groq, and Together AI.
-//
-// All of these speak the OpenAI chat completions wire format, so this package
-// is a thin configuration layer over providers/openai.
-package local
+package compatible
 
-import (
-	"github.com/Vedanshu7/llmbridge"
-	"github.com/Vedanshu7/llmbridge/providers/openai"
-)
+import "github.com/Vedanshu7/llmbridge/llms/openai"
 
 const (
 	ollamaDefaultURL     = "http://localhost:11434/v1/chat/completions"
@@ -26,7 +18,7 @@ const (
 //
 //	docker run -d -p 11434:11434 ollama/ollama
 //	docker exec <container> ollama pull llama3.2
-func NewOllama(model string) llmbridge.Provider {
+func NewOllama(model string) *openai.Provider {
 	if model == "" {
 		model = ollamaDefaultModel
 	}
@@ -34,8 +26,7 @@ func NewOllama(model string) llmbridge.Provider {
 }
 
 // NewOllamaAt returns a Provider for an Ollama instance at a custom URL.
-// Use when Ollama runs on a remote host or a non-default port.
-func NewOllamaAt(baseURL, model string) llmbridge.Provider {
+func NewOllamaAt(baseURL, model string) *openai.Provider {
 	if baseURL == "" {
 		baseURL = ollamaDefaultURL
 	}
@@ -51,7 +42,7 @@ func NewOllamaAt(baseURL, model string) llmbridge.Provider {
 // Via Docker (community image):
 //
 //	docker run -d -p 1234:1234 ghcr.io/lmstudio-community/lmstudio-server
-func NewLMStudio(model string) llmbridge.Provider {
+func NewLMStudio(model string) *openai.Provider {
 	if model == "" {
 		model = lmstudioDefaultModel
 	}
@@ -59,7 +50,7 @@ func NewLMStudio(model string) llmbridge.Provider {
 }
 
 // NewLMStudioAt returns a Provider for an LM Studio server at a custom URL.
-func NewLMStudioAt(baseURL, model string) llmbridge.Provider {
+func NewLMStudioAt(baseURL, model string) *openai.Provider {
 	if baseURL == "" {
 		baseURL = lmstudioDefaultURL
 	}
@@ -71,12 +62,12 @@ func NewLMStudioAt(baseURL, model string) llmbridge.Provider {
 
 // NewGroq returns a Provider backed by Groq's fast inference API.
 // Get an API key at https://console.groq.com
-func NewGroq(model, apiKey string) llmbridge.Provider {
+func NewGroq(model, apiKey string) *openai.Provider {
 	return openai.NewCompatible("groq", groqURL, apiKey, model)
 }
 
 // NewTogetherAI returns a Provider backed by Together AI, which hosts many
 // open-source models. Get an API key at https://api.together.xyz
-func NewTogetherAI(model, apiKey string) llmbridge.Provider {
+func NewTogetherAI(model, apiKey string) *openai.Provider {
 	return openai.NewCompatible("together", togetherURL, apiKey, model)
 }
