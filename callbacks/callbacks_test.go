@@ -83,7 +83,7 @@ func TestWebhookHandler(t *testing.T) {
 	var received []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
-		buf.ReadFrom(r.Body)
+		_, _ = buf.ReadFrom(r.Body)
 		received = buf.Bytes()
 		w.WriteHeader(http.StatusOK)
 	}))
