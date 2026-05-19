@@ -213,6 +213,51 @@ func (r *PIIRule) CheckResponse(resp *types.Response) error {
 	return r.check(resp.Content)
 }
 
+// PromptInjectionRule detects common prompt-injection and jailbreak patterns in request input.
+// CheckResponse is a no-op: the model's own output may legitimately discuss these topics.
+type PromptInjectionRule struct{}
+
+// injectionPhrases is the lower-cased list of patterns we scan for.
+var injectionPhrases = []string{
+	"ignore previous instructions",
+	"ignore your previous",
+	"disregard your instructions",
+	"forget your instructions",
+	"override instructions",
+	"new instructions:",
+	"you are now",
+	"pretend you are",
+	"act as if you are",
+	"act as though you are",
+	"[system]",
+	"[[instructions]]",
+	"<system>",
+	"</system>",
+}
+
+// BlockPromptInjection returns a Rule that rejects requests containing common
+// prompt-injection and jailbreak phrases. Matching is case-insensitive and
+// applies to the system prompt and all message contents.
+func BlockPromptInjection() Rule { return &PromptInjectionRule{} }
+
+func (r *PromptInjectionRule) CheckRequest(req *types.Request) error {
+	texts := []string{req.System}
+	for _, m := range req.Messages {
+		texts = append(texts, m.Content)
+	}
+	for _, text := range texts {
+		lt := strings.ToLower(text)
+		for _, phrase := range injectionPhrases {
+			if strings.Contains(lt, phrase) {
+				return fmt.Errorf("guardrails: prompt injection pattern detected: %q", phrase)
+			}
+		}
+	}
+	return nil
+}
+
+func (r *PromptInjectionRule) CheckResponse(_ *types.Response) error { return nil }
+
 // RegexRule blocks content matching a custom regular expression.
 type RegexRule struct {
 	re  *regexp.Regexp

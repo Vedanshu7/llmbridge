@@ -182,5 +182,211 @@ func (c *capturingProvider) Complete(ctx context.Context, req types.Request) (*t
 	c.onComplete(req)
 	return c.inner.Complete(ctx, req)
 }
-func (c *capturingProvider) Name() string             { return "capturing" }
+func (c *capturingProvider) Name() string              { return "capturing" }
 func (c *capturingProvider) ValidateEnvironment() error { return nil }
+
+// ---- Auth ----
+
+func TestAuthMissingKey(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+
+	rec := httptest.NewRecorder()
+	req := chatReq("gpt-4o", "hi")
+	// No Authorization header.
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", rec.Code)
+	}
+}
+
+func TestAuthInvalidKey(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+
+	rec := httptest.NewRecorder()
+	req := chatReq("gpt-4o", "hi")
+	req.Header.Set("Authorization", "Bearer not-a-real-key")
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with invalid key, got %d", rec.Code)
+	}
+}
+
+// ---- /v1/responses ----
+
+func responsesReq(input interface{}) *http.Request {
+	body := map[string]interface{}{
+		"model": "gpt-4o",
+		"input": input,
+	}
+	b, _ := json.Marshal(body)
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(b))
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
+func TestResponsesAPIStringInput(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "world"}}
+	srv, key := newTestServer(p)
+
+	rec := httptest.NewRecorder()
+	req := responsesReq("hello")
+	req.Header.Set("Authorization", "Bearer "+key)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out["object"] != "response" {
+		t.Fatalf("expected object=response, got %v", out["object"])
+	}
+	if out["status"] != "completed" {
+		t.Fatalf("expected status=completed, got %v", out["status"])
+	}
+	outputs, _ := out["output"].([]interface{})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(outputs))
+	}
+}
+
+func TestResponsesAPIArrayInput(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "reply"}}
+	srv, key := newTestServer(p)
+
+	rec := httptest.NewRecorder()
+	req := responsesReq([]map[string]string{
+		{"role": "system", "content": "You are helpful."},
+		{"role": "user", "content": "Hello"},
+	})
+	req.Header.Set("Authorization", "Bearer "+key)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if p.calls != 1 {
+		t.Fatalf("expected 1 provider call, got %d", p.calls)
+	}
+}
+
+func TestResponsesAPIMissingInput(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, key := newTestServer(p)
+
+	body := `{"model":"gpt-4o"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing input, got %d", rec.Code)
+	}
+}
+
+// ---- Org/team admin endpoints ----
+
+func adminKey(srv *Server) string {
+	k, _ := srv.keyStore.GenerateAPIKey([]string{"admin"})
+	return k
+}
+
+func TestCreateOrg(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+	ak := adminKey(srv)
+
+	body := `{"name":"acme","budget":100.0}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/orgs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ak)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out["id"] == "" {
+		t.Fatal("expected org id in response")
+	}
+	if out["name"] != "acme" {
+		t.Fatalf("expected name=acme, got %v", out["name"])
+	}
+}
+
+func TestCreateTeam(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+	ak := adminKey(srv)
+
+	// Create org first.
+	org, _ := srv.orgStore.CreateOrg("testorg", 0)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"org_id": org.ID,
+		"name":   "eng",
+		"budget": 50.0,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/teams", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ak)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out["org_id"] != org.ID {
+		t.Fatalf("team org_id mismatch: got %v", out["org_id"])
+	}
+}
+
+func TestCreateTeamUnknownOrg(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+	ak := adminKey(srv)
+
+	body := `{"org_id":"org_doesnotexist","name":"team1"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/teams", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ak)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown org, got %d", rec.Code)
+	}
+}
+
+func TestListOrgs(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, _ := newTestServer(p)
+	ak := adminKey(srv)
+	srv.orgStore.CreateOrg("a", 0) //nolint:errcheck
+	srv.orgStore.CreateOrg("b", 0) //nolint:errcheck
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/orgs", nil)
+	req.Header.Set("Authorization", "Bearer "+ak)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var out map[string]interface{}
+	json.NewDecoder(rec.Body).Decode(&out)
+	orgs, _ := out["orgs"].([]interface{})
+	if len(orgs) != 2 {
+		t.Fatalf("expected 2 orgs, got %d", len(orgs))
+	}
+}
