@@ -274,6 +274,52 @@ func (p *Provider) Speech(ctx context.Context, req types.SpeechRequest) (*types.
 	return &types.SpeechResponse{Audio: audio, Format: format, Provider: p.name, Model: model}, nil
 }
 
+// Moderate implements base.Moderator using the OpenAI /v1/moderations endpoint.
+func (p *Provider) Moderate(ctx context.Context, req types.ModerationRequest) (*types.ModerationResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = "omni-moderation-latest"
+	}
+	wireReq := map[string]interface{}{
+		"input": req.Input,
+		"model": model,
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postURL("https://api.openai.com/v1/moderations", body)
+	if err != nil {
+		return nil, err
+	}
+	var wire struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Results []struct {
+			Flagged        bool               `json:"flagged"`
+			Categories     map[string]bool    `json:"categories"`
+			CategoryScores map[string]float64 `json:"category_scores"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "unmarshal moderation: "+err.Error(), err)
+	}
+	results := make([]types.ModerationResult, len(wire.Results))
+	for i, r := range wire.Results {
+		results[i] = types.ModerationResult{
+			Flagged:        r.Flagged,
+			Categories:     r.Categories,
+			CategoryScores: r.CategoryScores,
+		}
+	}
+	return &types.ModerationResponse{
+		ID:       wire.ID,
+		Model:    wire.Model,
+		Results:  results,
+		Provider: p.name,
+	}, nil
+}
+
 // Stream implements base.Streamer for token-by-token output via SSE.
 func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.Delta, error) {
 	wireReq := chat.ToOAIRequest(req, p.model, true)

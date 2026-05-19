@@ -10,10 +10,12 @@
 package callbacks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -132,6 +134,46 @@ func JSONLogHandler(w io.Writer) Handler {
 		}
 		b, _ := json.Marshal(rec)
 		_, _ = fmt.Fprintf(w, "%s\n", b)
+	}
+}
+
+// WebhookHandler returns a Handler that POSTs one JSON payload per event to url.
+// The payload matches JSONLogHandler output. Delivery is best-effort — failures
+// are silently dropped to avoid blocking the call path.
+// An optional http.Client may be supplied; pass nil to use a 5-second default.
+func WebhookHandler(url string, client *http.Client) Handler {
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	return func(_ context.Context, event Event) {
+		rec := map[string]interface{}{
+			"time":     time.Now().UTC().Format(time.RFC3339Nano),
+			"event":    string(event.Type),
+			"provider": event.Provider,
+			"model":    event.Model,
+		}
+		if event.Duration > 0 {
+			rec["duration_ms"] = event.Duration.Milliseconds()
+		}
+		if t := totalTokens(event.Response); t > 0 {
+			rec["tokens"] = t
+		}
+		if event.Error != nil {
+			rec["error"] = event.Error.Error()
+		}
+		b, err := json.Marshal(rec)
+		if err != nil {
+			return
+		}
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
 	}
 }
 

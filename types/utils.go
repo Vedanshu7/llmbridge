@@ -319,6 +319,43 @@ type SpeechResponse struct {
 	Model string
 }
 
+// ModerationRequest is the input to a content moderation call.
+type ModerationRequest struct {
+	// Input is the text to classify.
+	Input string
+
+	// Model is the moderation model (e.g. "omni-moderation-latest", "text-moderation-latest").
+	// Empty string uses the provider default.
+	Model string
+}
+
+// ModerationResult is the moderation verdict for a single input.
+type ModerationResult struct {
+	// Flagged is true if the content violates the provider's policy.
+	Flagged bool
+
+	// Categories maps category names (e.g. "hate", "violence") to whether they triggered.
+	Categories map[string]bool
+
+	// CategoryScores maps category names to confidence scores (0.0–1.0).
+	CategoryScores map[string]float64
+}
+
+// ModerationResponse is the output from a content moderation call.
+type ModerationResponse struct {
+	// ID is the provider-assigned request identifier.
+	ID string
+
+	// Model is the moderation model that processed the request.
+	Model string
+
+	// Results contains one result per input item.
+	Results []ModerationResult
+
+	// Provider identifies which backend produced this response.
+	Provider string
+}
+
 // LLM is the base interface every provider must satisfy.
 // Defined here so types and base can share it without a circular import.
 type LLM interface {

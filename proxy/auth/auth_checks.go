@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -85,4 +86,37 @@ func writeAuthError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`{"error":{"message":"` + msg + `","type":"authentication_error"}}`))
+}
+
+// RequireRateLimit returns middleware that enforces per-key request rate limits.
+// Attaches X-RateLimit-* headers to every response. Returns 429 when limited.
+func RequireRateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := extractBearerToken(r)
+			if key == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			allowed, info := rl.Allow(key)
+			if info.LimitRequests > 0 {
+				w.Header().Set("X-RateLimit-Limit-Requests", fmt.Sprintf("%d", info.LimitRequests))
+				w.Header().Set("X-RateLimit-Remaining-Requests", fmt.Sprintf("%d", info.RemainingRequests))
+				w.Header().Set("X-RateLimit-Reset-Requests", info.ResetAt.UTC().Format("2006-01-02T15:04:05Z"))
+			}
+			if info.LimitTokens > 0 {
+				w.Header().Set("X-RateLimit-Limit-Tokens", fmt.Sprintf("%d", info.LimitTokens))
+				w.Header().Set("X-RateLimit-Remaining-Tokens", fmt.Sprintf("%d", info.RemainingTokens))
+				w.Header().Set("X-RateLimit-Reset-Tokens", info.ResetAt.UTC().Format("2006-01-02T15:04:05Z"))
+			}
+			if !allowed {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

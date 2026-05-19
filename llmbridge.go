@@ -204,3 +204,20 @@ func TextComplete(ctx context.Context, p TextCompleter, req TextRequest) (*TextR
 func Speech(ctx context.Context, p SpeechProvider, req SpeechRequest) (*SpeechResponse, error) {
 	return p.Speech(ctx, req)
 }
+
+// Moderator is the optional interface for content moderation.
+type Moderator = base.Moderator
+
+// ModerationRequest is the input to a content moderation call.
+type ModerationRequest = types.ModerationRequest
+
+// ModerationResponse is the output from a content moderation call.
+type ModerationResponse = types.ModerationResponse
+
+// ModerationResult is the moderation verdict for a single input.
+type ModerationResult = types.ModerationResult
+
+// Moderate classifies content for policy violations using the given Moderator.
+func Moderate(ctx context.Context, p Moderator, req ModerationRequest) (*ModerationResponse, error) {
+	return p.Moderate(ctx, req)
+}

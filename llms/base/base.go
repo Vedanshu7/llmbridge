@@ -79,3 +79,10 @@ type SpeechProvider interface {
 	Speech(ctx context.Context, req types.SpeechRequest) (*types.SpeechResponse, error)
 	Name() string
 }
+
+// Moderator is an optional interface for providers that support content
+// moderation (e.g. OpenAI /v1/moderations).
+type Moderator interface {
+	Moderate(ctx context.Context, req types.ModerationRequest) (*types.ModerationResponse, error)
+	Name() string
+}

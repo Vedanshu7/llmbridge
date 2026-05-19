@@ -32,34 +32,46 @@ import (
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 	"github.com/Vedanshu7/llmbridge/proxy/config"
 	"github.com/Vedanshu7/llmbridge/proxy/management"
+	"github.com/Vedanshu7/llmbridge/proxy/metrics"
 	"github.com/Vedanshu7/llmbridge/proxy/middleware"
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
 // Server is the OpenAI-compatible proxy HTTP server.
 type Server struct {
-	provider  base.LLM
-	keyStore  *auth.APIKeyStore
-	modelReg  *management.ModelRegistry
-	routerCfg *management.RouterConfig
-	jwtSecret []byte
-	aliases   map[string]string // short name → canonical model name
-	logFile   string            // path for access log (empty = disabled)
-	mux       *http.ServeMux
+	provider    base.LLM
+	keyStore    *auth.APIKeyStore
+	rateLimiter *auth.RateLimiter
+	collector   *metrics.Collector
+	modelReg    *management.ModelRegistry
+	routerCfg   *management.RouterConfig
+	jwtSecret   []byte
+	aliases     map[string]string // short name → canonical model name
+	logFile     string            // path for access log (empty = disabled)
+	mux         *http.ServeMux
 }
 
 // NewServer constructs a Server backed by the given LLM provider.
 // Pass a *llmbridge.Router as the provider to get multi-backend routing.
 func NewServer(provider base.LLM) *Server {
 	s := &Server{
-		provider:  provider,
-		keyStore:  auth.NewAPIKeyStore(),
-		modelReg:  management.NewModelRegistry(),
-		routerCfg: management.NewRouterConfig(),
+		provider:    provider,
+		keyStore:    auth.NewAPIKeyStore(),
+		rateLimiter: auth.NewRateLimiter(),
+		collector:   metrics.NewCollector(),
+		modelReg:    management.NewModelRegistry(),
+		routerCfg:   management.NewRouterConfig(),
 	}
 	s.mux = s.buildMux()
 	return s
 }
+
+// RateLimiter returns the server's rate limiter, allowing callers to set
+// per-key limits before the server starts.
+func (s *Server) RateLimiter() *auth.RateLimiter { return s.rateLimiter }
+
+// Metrics returns the server's metrics collector.
+func (s *Server) Metrics() *metrics.Collector { return s.collector }
 
 // KeyStore returns the server's API key store, allowing callers to
 // pre-populate keys before the server starts.
@@ -98,13 +110,14 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
 	}
 
-	var handler http.Handler = s.mux
+	// Wrap mux: metrics first (outermost), then optional access log.
+	var handler http.Handler = s.collector.Middleware(s.mux)
 	if s.logFile != "" {
 		f, err := os.OpenFile(s.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return fmt.Errorf("proxy: open log file %s: %w", s.logFile, err)
 		}
-		handler = middleware.RequestLogger(f)(s.mux)
+		handler = middleware.RequestLogger(f)(handler)
 	}
 
 	srv := &http.Server{Handler: handler}
@@ -129,14 +142,18 @@ func (s *Server) buildMux() *http.ServeMux {
 
 	// Public endpoints.
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.collector.Handler())
 
-	// Authenticated LLM endpoints (require valid API key or JWT).
+	// Authenticated LLM endpoints (require valid API key or JWT + rate limit).
 	authed := auth.RequireAuth(s.keyStore, s.jwtSecret)
+	limited := auth.RequireRateLimit(s.rateLimiter)
+	authedLimited := func(h http.Handler) http.Handler { return authed(limited(h)) }
 	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
 	mux.Handle("GET /v1/models/{model}", authed(http.HandlerFunc(s.handleGetModel)))
-	mux.Handle("POST /v1/chat/completions", authed(http.HandlerFunc(s.handleChatCompletion)))
-	mux.Handle("POST /v1/embeddings", authed(http.HandlerFunc(s.handleEmbeddings)))
-	mux.Handle("POST /v1/audio/speech", authed(http.HandlerFunc(s.handleSpeech)))
+	mux.Handle("POST /v1/chat/completions", authedLimited(http.HandlerFunc(s.handleChatCompletion)))
+	mux.Handle("POST /v1/embeddings", authedLimited(http.HandlerFunc(s.handleEmbeddings)))
+	mux.Handle("POST /v1/audio/speech", authedLimited(http.HandlerFunc(s.handleSpeech)))
+	mux.Handle("POST /v1/moderations", authedLimited(http.HandlerFunc(s.handleModerations)))
 
 	// Admin endpoints (require "admin" scope).
 	admin := auth.RequireScope(s.keyStore, "admin")
@@ -265,6 +282,49 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp.Audio)
 }
 
+func (s *Server) handleModerations(w http.ResponseWriter, r *http.Request) {
+	mod, ok := s.provider.(base.Moderator)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"provider does not support content moderation")
+		return
+	}
+
+	var body struct {
+		Input string `json:"input"`
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Input == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "input field required")
+		return
+	}
+
+	resp, err := mod.Moderate(r.Context(), types.ModerationRequest{Input: body.Input, Model: body.Model})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	type wireResult struct {
+		Flagged        bool               `json:"flagged"`
+		Categories     map[string]bool    `json:"categories"`
+		CategoryScores map[string]float64 `json:"category_scores"`
+	}
+	results := make([]wireResult, len(resp.Results))
+	for i, res := range resp.Results {
+		results[i] = wireResult{
+			Flagged:        res.Flagged,
+			Categories:     res.Categories,
+			CategoryScores: res.CategoryScores,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":      resp.ID,
+		"model":   resp.Model,
+		"results": results,
+	})
+}
+
 // openAIChatRequest is the subset of the OpenAI chat completions request we parse.
 type openAIChatRequest struct {
 	Model       string             `json:"model"`
@@ -334,12 +394,19 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiKey := auth.APIKeyFromContext(ctx)
 	// Track per-key spend.
 	if cost, costErr := llmbridge.CompletionCost(resp); costErr == nil && cost > 0 {
-		apiKey := auth.APIKeyFromContext(ctx)
 		if apiKey != "" {
 			_ = s.keyStore.RecordSpend(apiKey, cost)
 		}
+	}
+	// Track token usage for rate limiting and Prometheus metrics.
+	if resp.Usage != nil {
+		if apiKey != "" {
+			s.rateLimiter.RecordTokens(apiKey, resp.Usage.TotalTokens)
+		}
+		s.collector.RecordTokens(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
 	// Translate to OpenAI response format.
