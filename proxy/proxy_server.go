@@ -133,6 +133,17 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 	}
 	s.logFile = cfg.LogFile
 
+	// Seed orgs and teams from config.
+	for _, oe := range cfg.Orgs {
+		org, err := s.orgStore.CreateOrg(oe.Name, oe.Budget)
+		if err != nil {
+			continue
+		}
+		for _, te := range oe.Teams {
+			_, _ = s.orgStore.CreateTeam(org.ID, te.Name, te.Budget)
+		}
+	}
+
 	// Wire caching from config.
 	if cfg.CacheTTLSeconds != -1 {
 		ttl := 5 * time.Minute
@@ -159,6 +170,9 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 		}
 		if g.BlockPII {
 			rules = append(rules, guardrails.BlockPIIPatterns())
+		}
+		if g.BlockPromptInjection {
+			rules = append(rules, guardrails.BlockPromptInjection())
 		}
 		if len(rules) > 0 {
 			s.guardrails = guardrails.New(rules...)

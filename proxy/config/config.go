@@ -54,6 +54,36 @@ type Config struct {
 
 	// Guardrails configures the request/response safety engine.
 	Guardrails *GuardrailsConfig `json:"guardrails,omitempty"`
+
+	// Orgs pre-defines organizations and their teams.
+	Orgs []OrgEntry `json:"orgs,omitempty"`
+}
+
+// OrgEntry defines an organization and its teams for the config file.
+type OrgEntry struct {
+	// ID is an optional fixed org ID. Leave empty to auto-generate.
+	ID string `json:"id,omitempty"`
+
+	// Name is the org display name.
+	Name string `json:"name"`
+
+	// Budget is the maximum USD spend (0 = unlimited).
+	Budget float64 `json:"budget,omitempty"`
+
+	// Teams lists teams within this org.
+	Teams []TeamEntry `json:"teams,omitempty"`
+}
+
+// TeamEntry defines a team within an org for the config file.
+type TeamEntry struct {
+	// ID is an optional fixed team ID. Leave empty to auto-generate.
+	ID string `json:"id,omitempty"`
+
+	// Name is the team display name.
+	Name string `json:"name"`
+
+	// Budget is the maximum USD spend (0 = unlimited).
+	Budget float64 `json:"budget,omitempty"`
 }
 
 // GuardrailsConfig controls the proxy guardrails engine.
@@ -75,6 +105,10 @@ type GuardrailsConfig struct {
 
 	// BlockPII enables PII detection (email, SSN, credit card).
 	BlockPII bool `json:"block_pii,omitempty"`
+
+	// BlockPromptInjection enables detection of common prompt-injection and
+	// jailbreak phrases in request messages.
+	BlockPromptInjection bool `json:"block_prompt_injection,omitempty"`
 }
 
 // ModelEntry maps a user-facing model name to a provider and backend model.
