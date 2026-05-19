@@ -21,9 +21,10 @@ const (
 // Provider calls the Google Gemini generateContent API.
 // Construct with New; do not create the struct directly.
 type Provider struct {
-	model  string
-	apiKey string
-	client *http.Client
+	model      string
+	apiKey     string
+	client     *http.Client
+	apiBaseURL string // empty = use package-level baseURL const; set in tests
 }
 
 // New returns a Provider backed by Google Gemini.
@@ -91,9 +92,17 @@ func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.
 }
 
 func (p *Provider) generateContentURL() string {
-	return fmt.Sprintf("%s/%s:generateContent?key=%s", baseURL, p.model, p.apiKey)
+	base := baseURL
+	if p.apiBaseURL != "" {
+		base = p.apiBaseURL
+	}
+	return fmt.Sprintf("%s/%s:generateContent?key=%s", base, p.model, p.apiKey)
 }
 
 func (p *Provider) streamGenerateContentURL() string {
-	return fmt.Sprintf("%s/%s:streamGenerateContent?key=%s&alt=sse", baseURL, p.model, p.apiKey)
+	base := baseURL
+	if p.apiBaseURL != "" {
+		base = p.apiBaseURL
+	}
+	return fmt.Sprintf("%s/%s:streamGenerateContent?key=%s&alt=sse", base, p.model, p.apiKey)
 }

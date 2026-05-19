@@ -21,7 +21,12 @@ const (
 
 // MakeCall executes a blocking Anthropic Messages API request.
 func MakeCall(client *http.Client, apiKey string, body []byte) (*AntResponse, error) {
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
+	return MakeCallURL(client, apiKey, apiURL, body)
+}
+
+// MakeCallURL is like MakeCall but uses the provided URL instead of the default.
+func MakeCallURL(client *http.Client, apiKey, url string, body []byte) (*AntResponse, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, exceptions.NewProviderError("anthropic", 0, err.Error(), err)
 	}

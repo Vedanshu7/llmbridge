@@ -19,6 +19,8 @@ type KeyInfo struct {
 	SpendLimit   float64  // 0 = unlimited
 	CurrentSpend float64  // accumulated spend in USD
 	AllowedCIDRs []string // empty = allow all IPs; otherwise restrict to these CIDR ranges
+	OrgID        string   // empty = no org association
+	TeamID       string   // empty = no team association
 }
 
 // APIKeyStore is a thread-safe in-memory store of API keys.
@@ -140,6 +142,24 @@ func (s *APIKeyStore) RecordSpend(key string, cost float64) error {
 			key, info.CurrentSpend, info.SpendLimit)
 	}
 	return nil
+}
+
+// SetKeyOrg associates a key with an org.
+func (s *APIKeyStore) SetKeyOrg(key, orgID string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.OrgID = orgID
+	}
+	s.mu.Unlock()
+}
+
+// SetKeyTeam associates a key with a team.
+func (s *APIKeyStore) SetKeyTeam(key, teamID string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.TeamID = teamID
+	}
+	s.mu.Unlock()
 }
 
 // HasScope returns true if key has the given scope or the "admin" scope.

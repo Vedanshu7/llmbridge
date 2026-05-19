@@ -29,6 +29,7 @@ type Provider struct {
 	rerankModel string
 	apiKey      string
 	client      *http.Client
+	baseURL     string // empty = use chatURL const; set in tests
 }
 
 // New returns a Cohere Provider.

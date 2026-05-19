@@ -7,6 +7,7 @@
 //	GET  /v1/models                — list registered models
 //	GET  /v1/models/{model}        — get single model
 //	POST /v1/chat/completions      — chat completion (streaming supported)
+//	POST /v1/responses             — Responses API (stateless)
 //	POST /v1/embeddings            — embedding generation
 //	POST /v1/audio/speech          — text-to-speech
 //	POST /admin/key/generate       — create API key     (admin scope)
@@ -16,10 +17,15 @@
 //	POST /admin/models             — register a model   (admin scope)
 //	POST /admin/router             — deploy router cfg  (admin scope)
 //	GET  /admin/router             — list router cfgs   (admin scope)
+//	POST /admin/orgs               — create org         (admin scope)
+//	GET  /admin/orgs               — list orgs          (admin scope)
+//	POST /admin/teams              — create team        (admin scope)
+//	GET  /admin/teams              — list teams         (admin scope)
 package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +50,7 @@ import (
 type Server struct {
 	provider    base.LLM
 	keyStore    *auth.APIKeyStore
+	orgStore    *auth.OrgStore
 	rateLimiter *auth.RateLimiter
 	collector   *metrics.Collector
 	modelReg    *management.ModelRegistry
@@ -63,6 +70,7 @@ func NewServer(provider base.LLM) *Server {
 	s := &Server{
 		provider:    provider,
 		keyStore:    auth.NewAPIKeyStore(),
+		orgStore:    auth.NewOrgStore(),
 		rateLimiter: auth.NewRateLimiter(),
 		collector:   metrics.NewCollector(),
 		modelReg:    management.NewModelRegistry(),
@@ -208,6 +216,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
 	mux.Handle("GET /v1/models/{model}", authed(http.HandlerFunc(s.handleGetModel)))
 	mux.Handle("POST /v1/chat/completions", authedLimited(http.HandlerFunc(s.handleChatCompletion)))
+	mux.Handle("POST /v1/responses", authedLimited(http.HandlerFunc(s.handleResponses)))
 	mux.Handle("POST /v1/embeddings", authedLimited(http.HandlerFunc(s.handleEmbeddings)))
 	mux.Handle("POST /v1/audio/speech", authedLimited(http.HandlerFunc(s.handleSpeech)))
 	mux.Handle("POST /v1/moderations", authedLimited(http.HandlerFunc(s.handleModerations)))
@@ -224,6 +233,10 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleList)))
 	mux.Handle("GET /admin/aliases", admin(http.HandlerFunc(s.handleListAliases)))
 	mux.Handle("POST /admin/aliases", admin(http.HandlerFunc(s.handleSetAlias)))
+	mux.Handle("POST /admin/orgs", admin(http.HandlerFunc(s.handleCreateOrg)))
+	mux.Handle("GET /admin/orgs", admin(http.HandlerFunc(s.handleListOrgs)))
+	mux.Handle("POST /admin/teams", admin(http.HandlerFunc(s.handleCreateTeam)))
+	mux.Handle("GET /admin/teams", admin(http.HandlerFunc(s.handleListTeams)))
 
 	return mux
 }
@@ -483,10 +496,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiKey := auth.APIKeyFromContext(ctx)
-	// Track per-key spend.
+	// Track per-key spend and propagate to org/team budgets.
 	if cost, costErr := llmbridge.CompletionCost(resp); costErr == nil && cost > 0 {
 		if apiKey != "" {
 			_ = s.keyStore.RecordSpend(apiKey, cost)
+			if keyInfo, ok := s.keyStore.ValidateAPIKey(apiKey); ok {
+				if keyInfo.TeamID != "" {
+					_ = s.orgStore.RecordTeamSpend(keyInfo.TeamID, cost)
+				} else if keyInfo.OrgID != "" {
+					_ = s.orgStore.RecordOrgSpend(keyInfo.OrgID, cost)
+				}
+			}
 		}
 	}
 	// Track token usage for rate limiting and Prometheus metrics.
@@ -643,6 +663,169 @@ func buildOAIStreamChunk(d types.Delta) map[string]interface{} {
 		"object":  "chat.completion.chunk",
 		"choices": []interface{}{map[string]interface{}{"index": 0, "delta": delta}},
 	}
+}
+
+// ---- Org/team handlers ----
+
+func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name   string  `json:"name"`
+		Budget float64 `json:"budget"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "name field required")
+		return
+	}
+	org, err := s.orgStore.CreateOrg(body.Name, body.Budget)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, org)
+}
+
+func (s *Server) handleListOrgs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"orgs": s.orgStore.ListOrgs()})
+}
+
+func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OrgID  string  `json:"org_id"`
+		Name   string  `json:"name"`
+		Budget float64 `json:"budget"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OrgID == "" || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "org_id and name fields required")
+		return
+	}
+	team, err := s.orgStore.CreateTeam(body.OrgID, body.Name, body.Budget)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, team)
+}
+
+func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
+	orgID := r.URL.Query().Get("org_id")
+	writeJSON(w, http.StatusOK, map[string]interface{}{"teams": s.orgStore.ListTeams(orgID)})
+}
+
+// handleResponses implements the OpenAI Responses API (POST /v1/responses).
+// The endpoint is stateless: previous_response_id is accepted but ignored
+// because llmbridge does not persist server-side conversation state.
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	var raw struct {
+		Model              string          `json:"model"`
+		Input              json.RawMessage `json:"input"` // string | []{"role","content"} items
+		MaxOutputTokens    int             `json:"max_output_tokens,omitempty"`
+		Temperature        float64         `json:"temperature,omitempty"`
+		PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil || len(raw.Input) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse request body; input is required")
+		return
+	}
+
+	req := types.Request{
+		Model:       raw.Model,
+		MaxTokens:   raw.MaxOutputTokens,
+		Temperature: raw.Temperature,
+	}
+
+	// Input is either a bare string or an array of {role, content} items.
+	var inputStr string
+	if err := json.Unmarshal(raw.Input, &inputStr); err == nil {
+		req.Messages = []types.Message{{Role: "user", Content: inputStr}}
+	} else {
+		var items []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(raw.Input, &items); err != nil || len(items) == 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "input must be a string or non-empty array of message objects")
+			return
+		}
+		for _, item := range items {
+			if item.Role == "system" {
+				req.System = item.Content
+			} else {
+				req.Messages = append(req.Messages, types.Message{Role: item.Role, Content: item.Content})
+			}
+		}
+	}
+
+	ctx := r.Context()
+
+	if s.guardrails != nil {
+		if err := s.guardrails.CheckRequest(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "guardrail_violation", err.Error())
+			return
+		}
+	}
+
+	resp, err := s.provider.Complete(ctx, req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	if s.guardrails != nil {
+		if err := s.guardrails.CheckResponse(resp); err != nil {
+			writeError(w, http.StatusBadRequest, "guardrail_violation", err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, buildResponsesAPIResponse(resp))
+}
+
+func buildResponsesAPIResponse(resp *types.Response) map[string]interface{} {
+	var contentItems []map[string]interface{}
+	if resp.Content != "" {
+		contentItems = append(contentItems, map[string]interface{}{
+			"type": "output_text",
+			"text": resp.Content,
+		})
+	}
+	for _, tc := range resp.ToolCalls {
+		contentItems = append(contentItems, map[string]interface{}{
+			"type":      "tool_call",
+			"id":        tc.ID,
+			"name":      tc.Name,
+			"arguments": tc.Arguments,
+		})
+	}
+
+	out := map[string]interface{}{
+		"id":         "resp_" + newShortID(),
+		"object":     "response",
+		"created_at": time.Now().Unix(),
+		"model":      resp.Model,
+		"status":     "completed",
+		"output": []interface{}{
+			map[string]interface{}{
+				"type":    "message",
+				"id":      "msg_" + newShortID(),
+				"role":    "assistant",
+				"content": contentItems,
+			},
+		},
+	}
+	if resp.Usage != nil {
+		out["usage"] = map[string]int{
+			"input_tokens":  resp.Usage.PromptTokens,
+			"output_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":  resp.Usage.TotalTokens,
+		}
+	}
+	return out
+}
+
+func newShortID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
 // ---- Helpers ----

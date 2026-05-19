@@ -10,8 +10,15 @@ import (
 	"github.com/Vedanshu7/llmbridge/llms/cohere/chat"
 )
 
+func (p *Provider) chatEndpoint() string {
+	if p.baseURL != "" {
+		return p.baseURL
+	}
+	return chatURL
+}
+
 func (p *Provider) post(body []byte) (*chat.CohereResponse, error) {
-	req, err := http.NewRequest(http.MethodPost, chatURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, p.chatEndpoint(), bytes.NewReader(body))
 	if err != nil {
 		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
 	}
@@ -41,7 +48,7 @@ func (p *Provider) post(body []byte) (*chat.CohereResponse, error) {
 }
 
 func (p *Provider) newStreamConn(body []byte) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, chatURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, p.chatEndpoint(), bytes.NewReader(body))
 	if err != nil {
 		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
 	}

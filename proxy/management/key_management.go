@@ -20,12 +20,15 @@ func NewKeyManagement(store *auth.APIKeyStore) *KeyManagement {
 }
 
 // HandleGenerate handles POST /admin/key/generate.
-// Optional JSON fields: "scopes" ([]string), "ttl_seconds" (int), "spend_limit" (float64).
+// Optional JSON fields: "scopes" ([]string), "ttl_seconds" (int), "spend_limit" (float64),
+// "org_id" (string), "team_id" (string).
 func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Scopes     []string `json:"scopes"`
 		TTLSeconds int      `json:"ttl_seconds"`
 		SpendLimit float64  `json:"spend_limit"`
+		OrgID      string   `json:"org_id"`
+		TeamID     string   `json:"team_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Scopes) == 0 {
 		body.Scopes = []string{"completion"}
@@ -40,6 +43,12 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.SpendLimit > 0 {
 		km.store.SetSpendLimit(key, body.SpendLimit)
+	}
+	if body.OrgID != "" {
+		km.store.SetKeyOrg(key, body.OrgID)
+	}
+	if body.TeamID != "" {
+		km.store.SetKeyTeam(key, body.TeamID)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }

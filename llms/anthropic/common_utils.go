@@ -17,7 +17,11 @@ const (
 
 // doStream opens a streaming HTTP connection without a read deadline.
 func (p *Provider) doStream(body []byte) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
+	url := apiURL
+	if p.baseURL != "" {
+		url = p.baseURL
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, exceptions.NewProviderError("anthropic", 0, err.Error(), err)
 	}
@@ -41,5 +45,9 @@ func (p *Provider) doStream(body []byte) (*http.Response, error) {
 
 // makeCall wraps do(), reads the body, and returns a parsed AntResponse.
 func (p *Provider) makeCall(body []byte) (*chat.AntResponse, error) {
-	return chat.MakeCall(p.client, p.apiKey, body)
+	url := apiURL
+	if p.baseURL != "" {
+		url = p.baseURL
+	}
+	return chat.MakeCallURL(p.client, p.apiKey, url, body)
 }

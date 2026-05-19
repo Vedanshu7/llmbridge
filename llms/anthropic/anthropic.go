@@ -27,9 +27,10 @@ const defaultModel = "claude-sonnet-4-6"
 // Provider calls the Anthropic Messages API.
 // Construct with New; do not create the struct directly.
 type Provider struct {
-	apiKey string
-	model  string
-	client *http.Client
+	apiKey  string
+	model   string
+	client  *http.Client
+	baseURL string // empty = use default; set in tests
 }
 
 // New returns a Provider backed by Anthropic Claude.
