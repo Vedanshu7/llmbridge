@@ -49,7 +49,32 @@ type Config struct {
 	LogFile string `json:"log_file,omitempty"`
 
 	// CacheTTLSeconds is the default cache TTL in seconds (default: 300).
+	// Set to -1 to disable caching entirely.
 	CacheTTLSeconds int `json:"cache_ttl_seconds,omitempty"`
+
+	// Guardrails configures the request/response safety engine.
+	Guardrails *GuardrailsConfig `json:"guardrails,omitempty"`
+}
+
+// GuardrailsConfig controls the proxy guardrails engine.
+type GuardrailsConfig struct {
+	// MaxInputLength rejects requests whose total character count exceeds this.
+	// 0 = disabled.
+	MaxInputLength int `json:"max_input_length,omitempty"`
+
+	// MaxOutputLength rejects responses whose content character count exceeds this.
+	// 0 = disabled.
+	MaxOutputLength int `json:"max_output_length,omitempty"`
+
+	// MaxOutputTokens rejects responses that report more completion tokens than this.
+	// 0 = disabled.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+
+	// BlockKeywords is a list of words (case-insensitive) to reject in any message.
+	BlockKeywords []string `json:"block_keywords,omitempty"`
+
+	// BlockPII enables PII detection (email, SSN, credit card).
+	BlockPII bool `json:"block_pii,omitempty"`
 }
 
 // ModelEntry maps a user-facing model name to a provider and backend model.

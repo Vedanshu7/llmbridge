@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -35,7 +36,11 @@ func RequireAuth(store *APIKeyStore, jwtSecret ...[]byte) func(http.Handler) htt
 				return
 			}
 			// Try API key first.
-			if _, ok := store.ValidateAPIKey(token); ok {
+			if info, ok := store.ValidateAPIKey(token); ok {
+				if !ipAllowed(r, info.AllowedCIDRs) {
+					writeAuthError(w, "IP address not allowed for this key")
+					return
+				}
 				ctx := context.WithValue(r.Context(), ctxKeyAPIKey{}, token)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -72,6 +77,35 @@ func RequireScope(store *APIKeyStore, scope string) func(http.Handler) http.Hand
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// ipAllowed returns true when cidrs is empty (allow all) or the request's
+// remote address falls within one of the provided CIDR ranges.
+func ipAllowed(r *http.Request, cidrs []string) bool {
+	if len(cidrs) == 0 {
+		return true
+	}
+	// Prefer X-Forwarded-For when behind a proxy; fall back to RemoteAddr.
+	ipStr := r.Header.Get("X-Forwarded-For")
+	if ipStr == "" {
+		ipStr, _, _ = net.SplitHostPort(r.RemoteAddr)
+	} else {
+		// X-Forwarded-For may be a comma-separated list; use the first entry.
+		if idx := strings.Index(ipStr, ","); idx >= 0 {
+			ipStr = strings.TrimSpace(ipStr[:idx])
+		}
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractBearerToken(r *http.Request) string {

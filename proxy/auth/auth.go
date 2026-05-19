@@ -16,8 +16,9 @@ type KeyInfo struct {
 	LastUsed     time.Time
 	ExpiresAt    time.Time // zero = never expires
 	Scopes       []string
-	SpendLimit   float64 // 0 = unlimited
-	CurrentSpend float64 // accumulated spend in USD
+	SpendLimit   float64  // 0 = unlimited
+	CurrentSpend float64  // accumulated spend in USD
+	AllowedCIDRs []string // empty = allow all IPs; otherwise restrict to these CIDR ranges
 }
 
 // APIKeyStore is a thread-safe in-memory store of API keys.
@@ -100,6 +101,17 @@ func (s *APIKeyStore) SetExpiry(key string, ttl time.Duration) {
 	s.mu.Lock()
 	if info, ok := s.keys[key]; ok {
 		info.ExpiresAt = time.Now().Add(ttl)
+	}
+	s.mu.Unlock()
+}
+
+// SetAllowedIPs restricts key to requests originating from the given CIDR ranges.
+// Pass an empty slice to remove IP restrictions.
+// Example: SetAllowedIPs("llmb-abc", []string{"10.0.0.0/8", "192.168.1.0/24"})
+func (s *APIKeyStore) SetAllowedIPs(key string, cidrs []string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.AllowedCIDRs = cidrs
 	}
 	s.mu.Unlock()
 }

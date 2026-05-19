@@ -26,8 +26,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	llmbridge "github.com/Vedanshu7/llmbridge"
+	"github.com/Vedanshu7/llmbridge/caching"
+	"github.com/Vedanshu7/llmbridge/guardrails"
 	"github.com/Vedanshu7/llmbridge/llms/base"
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 	"github.com/Vedanshu7/llmbridge/proxy/config"
@@ -46,8 +49,11 @@ type Server struct {
 	modelReg    *management.ModelRegistry
 	routerCfg   *management.RouterConfig
 	jwtSecret   []byte
-	aliases     map[string]string // short name → canonical model name
-	logFile     string            // path for access log (empty = disabled)
+	aliases     map[string]string  // short name → canonical model name
+	logFile     string             // path for access log (empty = disabled)
+	cache       caching.Cache      // nil = caching disabled
+	cacheTTL    time.Duration      // default TTL for cache entries
+	guardrails  *guardrails.Engine // nil = guardrails disabled
 	mux         *http.ServeMux
 }
 
@@ -77,6 +83,24 @@ func (s *Server) Metrics() *metrics.Collector { return s.collector }
 // pre-populate keys before the server starts.
 func (s *Server) KeyStore() *auth.APIKeyStore { return s.keyStore }
 
+// SetCache attaches a cache to the server. When set, chat completion responses
+// are stored and served from cache keyed by the request content.
+// Pass a nil TTL to use the default 5-minute TTL.
+func (s *Server) SetCache(c caching.Cache, ttl time.Duration) {
+	s.cache = c
+	if ttl > 0 {
+		s.cacheTTL = ttl
+	} else {
+		s.cacheTTL = 5 * time.Minute
+	}
+}
+
+// SetGuardrails attaches a guardrails engine that runs on every chat completion
+// request and response.
+func (s *Server) SetGuardrails(e *guardrails.Engine) {
+	s.guardrails = e
+}
+
 // SetJWTSecret configures the HS256 secret used to accept JWT bearer tokens.
 func (s *Server) SetJWTSecret(secret []byte) {
 	s.jwtSecret = secret
@@ -100,6 +124,39 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 		s.aliases = cfg.Aliases
 	}
 	s.logFile = cfg.LogFile
+
+	// Wire caching from config.
+	if cfg.CacheTTLSeconds != -1 {
+		ttl := 5 * time.Minute
+		if cfg.CacheTTLSeconds > 0 {
+			ttl = time.Duration(cfg.CacheTTLSeconds) * time.Second
+		}
+		s.SetCache(caching.NewInMemoryCache(), ttl)
+	}
+
+	// Wire guardrails from config.
+	if g := cfg.Guardrails; g != nil {
+		var rules []guardrails.Rule
+		if g.MaxInputLength > 0 {
+			rules = append(rules, guardrails.MaxInputLength(g.MaxInputLength))
+		}
+		if g.MaxOutputLength > 0 {
+			rules = append(rules, guardrails.MaxOutputLength(g.MaxOutputLength))
+		}
+		if g.MaxOutputTokens > 0 {
+			rules = append(rules, guardrails.MaxOutputTokens(g.MaxOutputTokens))
+		}
+		if len(g.BlockKeywords) > 0 {
+			rules = append(rules, guardrails.BlockKeywords(g.BlockKeywords))
+		}
+		if g.BlockPII {
+			rules = append(rules, guardrails.BlockPIIPatterns())
+		}
+		if len(rules) > 0 {
+			s.guardrails = guardrails.New(rules...)
+		}
+	}
+
 	return s
 }
 
@@ -383,15 +440,46 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Guardrails — check request before sending to provider.
+	if s.guardrails != nil {
+		if err := s.guardrails.CheckRequest(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "guardrail_violation", err.Error())
+			return
+		}
+	}
+
 	if oaiReq.Stream {
 		s.streamChatCompletion(w, r, ctx, req)
 		return
+	}
+
+	// Cache lookup (non-streaming only).
+	var cacheKey string
+	if s.cache != nil {
+		cacheKey = caching.GenerateCacheKey(req)
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			writeJSON(w, http.StatusOK, buildOAIResponse(cached))
+			return
+		}
 	}
 
 	resp, err := s.provider.Complete(ctx, req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
+	}
+
+	// Guardrails — check response before sending to client.
+	if s.guardrails != nil {
+		if err := s.guardrails.CheckResponse(resp); err != nil {
+			writeError(w, http.StatusBadRequest, "guardrail_violation", err.Error())
+			return
+		}
+	}
+
+	// Store in cache on success.
+	if s.cache != nil && cacheKey != "" {
+		s.cache.Set(cacheKey, resp, s.cacheTTL)
 	}
 
 	apiKey := auth.APIKeyFromContext(ctx)

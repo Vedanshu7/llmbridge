@@ -17,20 +17,47 @@ import (
 	"github.com/Vedanshu7/llmbridge/exceptions"
 )
 
+// AlertFunc is called when a key's spend crosses an alert threshold.
+// spend is the current total; limit is the configured budget ceiling.
+type AlertFunc func(keyID string, spend, limit float64)
+
 // Manager tracks per-key spend and enforces optional limits.
 // All methods are safe for concurrent use.
 type Manager struct {
-	mu      sync.RWMutex
-	limits  map[string]float64 // 0 = no limit
-	current map[string]float64
+	mu         sync.RWMutex
+	limits     map[string]float64 // 0 = no limit
+	current    map[string]float64
+	thresholds map[string]float64 // fraction of limit at which to fire alert (0.0–1.0)
+	alerted    map[string]bool    // true once alert has fired for this key in this window
+	onAlert    AlertFunc          // nil = no alerts
 }
 
 // NewManager returns an empty Manager with no limits.
 func NewManager() *Manager {
 	return &Manager{
-		limits:  make(map[string]float64),
-		current: make(map[string]float64),
+		limits:     make(map[string]float64),
+		current:    make(map[string]float64),
+		thresholds: make(map[string]float64),
+		alerted:    make(map[string]bool),
 	}
+}
+
+// OnAlert registers a function to call when spend crosses an alert threshold.
+// Only one callback is supported; calling OnAlert again replaces the previous one.
+func (m *Manager) OnAlert(fn AlertFunc) {
+	m.mu.Lock()
+	m.onAlert = fn
+	m.mu.Unlock()
+}
+
+// SetAlertThreshold configures an alert for keyID that fires the first time
+// spend reaches fraction of the limit (e.g. 0.8 = 80%). Requires a limit to
+// be set for the key. Calling Reset clears the fired state so the alert can
+// fire again.
+func (m *Manager) SetAlertThreshold(keyID string, fraction float64) {
+	m.mu.Lock()
+	m.thresholds[keyID] = fraction
+	m.mu.Unlock()
 }
 
 // SetLimit sets the maximum USD spend for keyID.
@@ -50,23 +77,43 @@ func (m *Manager) RemoveLimit(keyID string) {
 
 // RecordSpend adds cost to keyID's current spend.
 // Returns a *exceptions.BudgetExceededError if the result exceeds the configured limit.
+// Fires the alert callback (if set) the first time spend crosses the alert threshold.
 func (m *Manager) RecordSpend(keyID string, cost float64) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.current[keyID] += cost
+	spend := m.current[keyID]
 	limit, hasLimit := m.limits[keyID]
-	if hasLimit && limit > 0 && m.current[keyID] > limit {
-		return &exceptions.BudgetExceededError{
+
+	// Check alert threshold (fire once per reset cycle).
+	var alertFn AlertFunc
+	var alertSpend, alertLimit float64
+	if hasLimit && limit > 0 && m.onAlert != nil && !m.alerted[keyID] {
+		if frac, ok := m.thresholds[keyID]; ok && frac > 0 && spend >= frac*limit {
+			m.alerted[keyID] = true
+			alertFn = m.onAlert
+			alertSpend, alertLimit = spend, limit
+		}
+	}
+
+	var budgetErr error
+	if hasLimit && limit > 0 && spend > limit {
+		budgetErr = &exceptions.BudgetExceededError{
 			APIError: exceptions.APIError{
 				LLMProvider: keyID,
 				StatusCode:  429,
 				Message:     fmt.Sprintf("budget exceeded for %s", keyID),
 			},
 			Budget:  limit,
-			Current: m.current[keyID],
+			Current: spend,
 		}
 	}
-	return nil
+	m.mu.Unlock()
+
+	// Fire alert outside the lock to avoid deadlock if the callback calls back into Manager.
+	if alertFn != nil {
+		alertFn(keyID, alertSpend, alertLimit)
+	}
+	return budgetErr
 }
 
 // GetSpend returns the total spend recorded for keyID.
@@ -84,10 +131,11 @@ func (m *Manager) GetLimit(keyID string) (float64, bool) {
 	return l, ok && l > 0
 }
 
-// Reset clears the current spend for keyID without removing its limit.
+// Reset clears the current spend and alert-fired state for keyID without removing its limit.
 func (m *Manager) Reset(keyID string) {
 	m.mu.Lock()
 	m.current[keyID] = 0
+	delete(m.alerted, keyID)
 	m.mu.Unlock()
 }
 
