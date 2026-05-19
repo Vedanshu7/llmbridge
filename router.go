@@ -13,15 +13,18 @@ import (
 
 // HealthStatus records the last known health of a provider.
 type HealthStatus struct {
-	Healthy   bool
-	LastCheck time.Time
-	LastError error
+	Healthy       bool
+	LastCheck     time.Time
+	LastError     error
+	Failures      int       // consecutive failure count (reset on success)
+	CooldownUntil time.Time // skip provider until this time (circuit breaker)
 }
 
-// TaggedProvider pairs a Provider with routing tags.
+// TaggedProvider pairs a Provider with routing tags and an optional weight.
 type TaggedProvider struct {
 	Provider Provider
 	Tags     []string // e.g. ["fast", "cheap", "vision"]
+	Weight   int      // relative traffic weight for Weighted strategy; 0 treated as 1
 }
 
 // Strategy controls how the Router picks a provider for each request.
@@ -45,6 +48,9 @@ const (
 
 	// CostBased routes to minimize estimated cost per request.
 	CostBased
+
+	// Weighted distributes traffic proportionally to each provider's Weight field.
+	Weighted
 )
 
 // RetryPolicy controls per-provider retry behavior inside the Router.
@@ -85,12 +91,16 @@ type RoutingGroup struct {
 type Router struct {
 	providers []Provider
 	tags      [][]string // parallel to providers; nil slice = any tags
+	weights   []int      // parallel to providers; used by Weighted strategy
 	strategy  Strategy
 	policy    RetryPolicy
 	groups    []RoutingGroup
 
 	contextWindowFallback bool
 	requiredTags          []string
+
+	cbThreshold int           // circuit breaker: failures before cooldown (0 = disabled)
+	cbCooldown  time.Duration // circuit breaker: cooldown duration
 
 	mu       sync.Mutex
 	robin    int
@@ -105,16 +115,22 @@ type Router struct {
 
 // NewRouter returns a Router that dispatches across the given providers.
 func NewRouter(providers []Provider, opts ...RouterOption) *Router {
+	n := len(providers)
+	ws := make([]int, n)
+	for i := range ws {
+		ws[i] = 1
+	}
 	r := &Router{
 		providers: providers,
-		tags:      make([][]string, len(providers)),
+		tags:      make([][]string, n),
+		weights:   ws,
 		strategy:  PriorityOrder,
 		policy:    DefaultRetryPolicy,
-		latency:   make([]time.Duration, len(providers)),
-		observed:  make([]bool, len(providers)),
-		inflight:  make([]int, len(providers)),
-		spent:     make([]float64, len(providers)),
-		health:    makeHealthSlice(len(providers)),
+		latency:   make([]time.Duration, n),
+		observed:  make([]bool, n),
+		inflight:  make([]int, n),
+		spent:     make([]float64, n),
+		health:    makeHealthSlice(n),
 	}
 	for _, o := range opts {
 		o(r)
@@ -122,25 +138,34 @@ func NewRouter(providers []Provider, opts ...RouterOption) *Router {
 	return r
 }
 
-// NewTagRouter returns a Router where each provider carries routing tags.
+// NewTagRouter returns a Router where each provider carries routing tags and optional weights.
 // Use WithRequiredTags to filter providers by tag at request time.
+// Use WithStrategy(Weighted) to route proportionally by Weight.
 func NewTagRouter(providers []TaggedProvider, opts ...RouterOption) *Router {
-	ps := make([]Provider, len(providers))
-	ts := make([][]string, len(providers))
+	n := len(providers)
+	ps := make([]Provider, n)
+	ts := make([][]string, n)
+	ws := make([]int, n)
 	for i, tp := range providers {
 		ps[i] = tp.Provider
 		ts[i] = tp.Tags
+		if tp.Weight > 0 {
+			ws[i] = tp.Weight
+		} else {
+			ws[i] = 1
+		}
 	}
 	r := &Router{
 		providers: ps,
 		tags:      ts,
+		weights:   ws,
 		strategy:  PriorityOrder,
 		policy:    DefaultRetryPolicy,
-		latency:   make([]time.Duration, len(ps)),
-		observed:  make([]bool, len(ps)),
-		inflight:  make([]int, len(ps)),
-		spent:     make([]float64, len(ps)),
-		health:    makeHealthSlice(len(ps)),
+		latency:   make([]time.Duration, n),
+		observed:  make([]bool, n),
+		inflight:  make([]int, n),
+		spent:     make([]float64, n),
+		health:    makeHealthSlice(n),
 	}
 	for _, o := range opts {
 		o(r)
@@ -186,6 +211,21 @@ func WithRequiredTags(tags []string) RouterOption {
 	return func(r *Router) { r.requiredTags = tags }
 }
 
+// WithWeightedStrategy is a convenience option that sets the Weighted strategy.
+func WithWeightedStrategy() RouterOption {
+	return WithStrategy(Weighted)
+}
+
+// WithCircuitBreaker enables the circuit breaker. After threshold consecutive
+// failures on a provider, it is placed in cooldown for the given duration.
+// Set threshold to 0 to disable (default).
+func WithCircuitBreaker(threshold int, cooldown time.Duration) RouterOption {
+	return func(r *Router) {
+		r.cbThreshold = threshold
+		r.cbCooldown = cooldown
+	}
+}
+
 // WithHealthChecks starts a background goroutine that calls ValidateEnvironment()
 // on each provider every interval. Providers that error are marked unhealthy and
 // skipped in routing until they recover.
@@ -220,14 +260,42 @@ func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Respon
 		resp, err := r.tryWithPolicy(ctx, p, req, idx)
 		r.incInflight(idx, -1)
 		if err == nil {
+			r.recordSuccess(idx)
 			return resp, nil
 		}
+		r.recordFailure(idx)
 		lastErr = err
 		if !isRetryable(err) && !r.isFallbackable(err) {
 			return nil, err
 		}
 	}
 	return nil, lastErr
+}
+
+// recordSuccess resets the circuit breaker failure count for a provider.
+func (r *Router) recordSuccess(idx int) {
+	if r.cbThreshold <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.health[idx].Failures = 0
+	r.health[idx].CooldownUntil = time.Time{}
+	r.mu.Unlock()
+}
+
+// recordFailure increments the failure count and trips the circuit breaker
+// once the threshold is reached.
+func (r *Router) recordFailure(idx int) {
+	if r.cbThreshold <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.health[idx].Failures++
+	if r.health[idx].Failures >= r.cbThreshold {
+		r.health[idx].Healthy = false
+		r.health[idx].CooldownUntil = time.Now().Add(r.cbCooldown)
+	}
+	r.mu.Unlock()
 }
 
 // isFallbackable returns true if the error should trigger failover to the next provider.
@@ -280,9 +348,16 @@ func (r *Router) pickOrder() []int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Build candidate set: healthy and matching required tags.
+	// Build candidate set: healthy (or cooldown expired), matching required tags.
+	now := time.Now()
 	eligible := make([]int, 0, n)
 	for i := range n {
+		// Auto-recover from circuit breaker cooldown.
+		if !r.health[i].Healthy && !r.health[i].CooldownUntil.IsZero() && now.After(r.health[i].CooldownUntil) {
+			r.health[i].Healthy = true
+			r.health[i].Failures = 0
+			r.health[i].CooldownUntil = time.Time{}
+		}
 		if !r.health[i].Healthy {
 			continue
 		}
@@ -291,7 +366,7 @@ func (r *Router) pickOrder() []int {
 		}
 		eligible = append(eligible, i)
 	}
-	// Fallback: if all providers are unhealthy, try them all anyway.
+	// Fallback: if all providers are unhealthy/in-cooldown, try them all anyway.
 	if len(eligible) == 0 {
 		eligible = seqOrder(n)
 	}
@@ -354,6 +429,29 @@ func (r *Router) pickOrder() []int {
 		out := make([]int, len(sorted))
 		for i, si := range sorted {
 			out[i] = eligible[si]
+		}
+		return out
+
+	case Weighted:
+		// Build an expanded list where each provider appears Weight times,
+		// then pick one uniformly at random as the first choice.
+		var pool []int
+		for _, idx := range eligible {
+			w := r.weights[idx]
+			if w <= 0 {
+				w = 1
+			}
+			for range w {
+				pool = append(pool, idx)
+			}
+		}
+		chosen := pool[rand.IntN(len(pool))]
+		// Return chosen first, then the rest in priority order for fallback.
+		out := []int{chosen}
+		for _, idx := range eligible {
+			if idx != chosen {
+				out = append(out, idx)
+			}
 		}
 		return out
 

@@ -34,11 +34,22 @@ type Config struct {
 	// Models is the list of model entries to register in the model registry.
 	Models []ModelEntry `json:"models,omitempty"`
 
+	// Aliases maps short model names to their canonical registered names.
+	// Example: {"gpt4": "gpt-4o", "sonnet": "claude-sonnet-4-6"}
+	Aliases map[string]string `json:"aliases,omitempty"`
+
 	// Router configures the multi-provider router, if used.
 	Router *RouterConfig `json:"router,omitempty"`
 
 	// LogLevel controls verbosity: "debug", "info", "warn", "error".
 	LogLevel string `json:"log_level,omitempty"`
+
+	// LogFile is the path to write access logs (one JSON line per request).
+	// Leave empty to disable access logging.
+	LogFile string `json:"log_file,omitempty"`
+
+	// CacheTTLSeconds is the default cache TTL in seconds (default: 300).
+	CacheTTLSeconds int `json:"cache_ttl_seconds,omitempty"`
 }
 
 // ModelEntry maps a user-facing model name to a provider and backend model.

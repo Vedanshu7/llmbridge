@@ -25,12 +25,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 
 	llmbridge "github.com/Vedanshu7/llmbridge"
 	"github.com/Vedanshu7/llmbridge/llms/base"
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 	"github.com/Vedanshu7/llmbridge/proxy/config"
 	"github.com/Vedanshu7/llmbridge/proxy/management"
+	"github.com/Vedanshu7/llmbridge/proxy/middleware"
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
@@ -41,6 +43,8 @@ type Server struct {
 	modelReg  *management.ModelRegistry
 	routerCfg *management.RouterConfig
 	jwtSecret []byte
+	aliases   map[string]string // short name → canonical model name
+	logFile   string            // path for access log (empty = disabled)
 	mux       *http.ServeMux
 }
 
@@ -80,6 +84,10 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 	for _, m := range cfg.Models {
 		s.modelReg.RegisterModel(m.Name, management.ModelInfo{Provider: m.Provider, Model: m.Model})
 	}
+	if len(cfg.Aliases) > 0 {
+		s.aliases = cfg.Aliases
+	}
+	s.logFile = cfg.LogFile
 	return s
 }
 
@@ -89,7 +97,17 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
 	}
-	srv := &http.Server{Handler: s.mux}
+
+	var handler http.Handler = s.mux
+	if s.logFile != "" {
+		f, err := os.OpenFile(s.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("proxy: open log file %s: %w", s.logFile, err)
+		}
+		handler = middleware.RequestLogger(f)(s.mux)
+	}
+
+	srv := &http.Server{Handler: handler}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
@@ -130,6 +148,8 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("POST /admin/models", admin(http.HandlerFunc(s.modelReg.HandleRegister)))
 	mux.Handle("POST /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleDeploy)))
 	mux.Handle("GET /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleList)))
+	mux.Handle("GET /admin/aliases", admin(http.HandlerFunc(s.handleListAliases)))
+	mux.Handle("POST /admin/aliases", admin(http.HandlerFunc(s.handleSetAlias)))
 
 	return mux
 }
@@ -168,6 +188,30 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		"object":   "model",
 		"owned_by": "llmbridge",
 	})
+}
+
+func (s *Server) handleListAliases(w http.ResponseWriter, r *http.Request) {
+	if s.aliases == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"aliases": map[string]string{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"aliases": s.aliases})
+}
+
+func (s *Server) handleSetAlias(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Alias    string `json:"alias"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Alias == "" || body.Model == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "alias and model fields required")
+		return
+	}
+	if s.aliases == nil {
+		s.aliases = make(map[string]string)
+	}
+	s.aliases[body.Alias] = body.Model
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "alias": body.Alias, "model": body.Model})
 }
 
 func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +294,13 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&oaiReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse request body")
 		return
+	}
+
+	// Resolve model alias if configured.
+	if s.aliases != nil {
+		if canonical, ok := s.aliases[oaiReq.Model]; ok {
+			oaiReq.Model = canonical
+		}
 	}
 
 	// Translate to types.Request.

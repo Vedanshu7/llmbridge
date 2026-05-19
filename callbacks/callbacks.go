@@ -11,6 +11,7 @@ package callbacks
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -108,6 +109,30 @@ func LogHandler(w io.Writer) Handler {
 // NoopHandler returns a Handler that does nothing. Useful in tests.
 func NoopHandler() Handler {
 	return func(_ context.Context, _ Event) {}
+}
+
+// JSONLogHandler returns a Handler that writes one JSON line per event to w.
+// Output fields: time, event, provider, model, duration_ms, tokens, error.
+func JSONLogHandler(w io.Writer) Handler {
+	return func(_ context.Context, event Event) {
+		rec := map[string]interface{}{
+			"time":     time.Now().UTC().Format(time.RFC3339Nano),
+			"event":    string(event.Type),
+			"provider": event.Provider,
+			"model":    event.Model,
+		}
+		if event.Duration > 0 {
+			rec["duration_ms"] = event.Duration.Milliseconds()
+		}
+		if t := totalTokens(event.Response); t > 0 {
+			rec["tokens"] = t
+		}
+		if event.Error != nil {
+			rec["error"] = event.Error.Error()
+		}
+		b, _ := json.Marshal(rec)
+		_, _ = fmt.Fprintf(w, "%s\n", b)
+	}
 }
 
 func totalTokens(resp *types.Response) int {
