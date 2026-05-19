@@ -14,6 +14,7 @@ type KeyInfo struct {
 	Key          string
 	CreatedAt    time.Time
 	LastUsed     time.Time
+	ExpiresAt    time.Time // zero = never expires
 	Scopes       []string
 	SpendLimit   float64 // 0 = unlimited
 	CurrentSpend float64 // accumulated spend in USD
@@ -48,12 +49,17 @@ func (s *APIKeyStore) GenerateAPIKey(scopes []string) (string, error) {
 	return key, nil
 }
 
-// ValidateAPIKey returns true and updates LastUsed if the key exists.
+// ValidateAPIKey returns the KeyInfo and true if the key exists and has not expired.
+// Expired keys are deleted on access.
 func (s *APIKeyStore) ValidateAPIKey(key string) (*KeyInfo, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info, ok := s.keys[key]
 	if !ok {
+		return nil, false
+	}
+	if !info.ExpiresAt.IsZero() && time.Now().After(info.ExpiresAt) {
+		delete(s.keys, key)
 		return nil, false
 	}
 	info.LastUsed = time.Now()
@@ -85,6 +91,15 @@ func (s *APIKeyStore) ImportKey(key string, scopes []string) {
 		Key:       key,
 		CreatedAt: time.Now(),
 		Scopes:    scopes,
+	}
+	s.mu.Unlock()
+}
+
+// SetExpiry sets a TTL on a key. After ttl elapses the key is invalidated on next use.
+func (s *APIKeyStore) SetExpiry(key string, ttl time.Duration) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.ExpiresAt = time.Now().Add(ttl)
 	}
 	s.mu.Unlock()
 }

@@ -286,6 +286,39 @@ type TextResponse struct {
 	Usage    *UsageData
 }
 
+// SpeechRequest is the input to a text-to-speech call.
+type SpeechRequest struct {
+	// Input is the text to synthesize.
+	Input string
+
+	// Model is the TTS model (e.g. "tts-1", "tts-1-hd").
+	Model string
+
+	// Voice selects the voice (e.g. "alloy", "echo", "fable", "onyx", "nova", "shimmer").
+	Voice string
+
+	// ResponseFormat is the audio format: "mp3", "opus", "aac", "flac", "wav", "pcm".
+	ResponseFormat string
+
+	// Speed adjusts the playback rate (0.25–4.0). 0 uses the provider default (1.0).
+	Speed float64
+}
+
+// SpeechResponse is the output from a text-to-speech call.
+type SpeechResponse struct {
+	// Audio contains the raw audio bytes in the requested format.
+	Audio []byte
+
+	// Format is the audio format of the returned bytes.
+	Format string
+
+	// Provider identifies which backend produced this response.
+	Provider string
+
+	// Model is the specific model that generated this response.
+	Model string
+}
+
 // LLM is the base interface every provider must satisfy.
 // Defined here so types and base can share it without a circular import.
 type LLM interface {

@@ -5,8 +5,10 @@
 //
 //	GET  /health                   — liveness check
 //	GET  /v1/models                — list registered models
+//	GET  /v1/models/{model}        — get single model
 //	POST /v1/chat/completions      — chat completion (streaming supported)
 //	POST /v1/embeddings            — embedding generation
+//	POST /v1/audio/speech          — text-to-speech
 //	POST /admin/key/generate       — create API key     (admin scope)
 //	DELETE /admin/key/delete       — delete API key     (admin scope)
 //	GET  /admin/keys               — list API keys      (admin scope)
@@ -113,8 +115,10 @@ func (s *Server) buildMux() *http.ServeMux {
 	// Authenticated LLM endpoints (require valid API key or JWT).
 	authed := auth.RequireAuth(s.keyStore, s.jwtSecret)
 	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
+	mux.Handle("GET /v1/models/{model}", authed(http.HandlerFunc(s.handleGetModel)))
 	mux.Handle("POST /v1/chat/completions", authed(http.HandlerFunc(s.handleChatCompletion)))
 	mux.Handle("POST /v1/embeddings", authed(http.HandlerFunc(s.handleEmbeddings)))
+	mux.Handle("POST /v1/audio/speech", authed(http.HandlerFunc(s.handleSpeech)))
 
 	// Admin endpoints (require "admin" scope).
 	admin := auth.RequireScope(s.keyStore, "admin")
@@ -151,6 +155,70 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   data,
 	})
+}
+
+func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("model")
+	if _, ok := s.modelReg.GetModel(name); !ok {
+		writeError(w, http.StatusNotFound, "not_found_error", "model not found: "+name)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":       name,
+		"object":   "model",
+		"owned_by": "llmbridge",
+	})
+}
+
+func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
+	speaker, ok := s.provider.(base.SpeechProvider)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"provider does not support text-to-speech")
+		return
+	}
+
+	var body struct {
+		Input          string  `json:"input"`
+		Model          string  `json:"model"`
+		Voice          string  `json:"voice"`
+		ResponseFormat string  `json:"response_format"`
+		Speed          float64 `json:"speed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Input == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "input field required")
+		return
+	}
+
+	req := types.SpeechRequest{
+		Input:          body.Input,
+		Model:          body.Model,
+		Voice:          body.Voice,
+		ResponseFormat: body.ResponseFormat,
+		Speed:          body.Speed,
+	}
+	resp, err := speaker.Speech(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	ct := "audio/mpeg"
+	switch resp.Format {
+	case "opus":
+		ct = "audio/ogg"
+	case "aac":
+		ct = "audio/aac"
+	case "flac":
+		ct = "audio/flac"
+	case "wav":
+		ct = "audio/wav"
+	case "pcm":
+		ct = "audio/pcm"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp.Audio)
 }
 
 // openAIChatRequest is the subset of the OpenAI chat completions request we parse.

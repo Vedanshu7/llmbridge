@@ -4,6 +4,7 @@ package management
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 )
@@ -19,17 +20,26 @@ func NewKeyManagement(store *auth.APIKeyStore) *KeyManagement {
 }
 
 // HandleGenerate handles POST /admin/key/generate.
+// Optional JSON fields: "scopes" ([]string), "ttl_seconds" (int), "spend_limit" (float64).
 func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Scopes []string `json:"scopes"`
+		Scopes     []string `json:"scopes"`
+		TTLSeconds int      `json:"ttl_seconds"`
+		SpendLimit float64  `json:"spend_limit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Scopes) == 0 {
 		body.Scopes = []string{"completion"}
 	}
 	key, err := km.store.GenerateAPIKey(body.Scopes)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if body.TTLSeconds > 0 {
+		km.store.SetExpiry(key, time.Duration(body.TTLSeconds)*time.Second)
+	}
+	if body.SpendLimit > 0 {
+		km.store.SetSpendLimit(key, body.SpendLimit)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }

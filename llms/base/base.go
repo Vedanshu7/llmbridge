@@ -72,3 +72,10 @@ type TextCompleter interface {
 	TextComplete(ctx context.Context, req types.TextRequest) (*types.TextResponse, error)
 	Name() string
 }
+
+// SpeechProvider is an optional interface for providers that support
+// converting text to audio (e.g. OpenAI TTS).
+type SpeechProvider interface {
+	Speech(ctx context.Context, req types.SpeechRequest) (*types.SpeechResponse, error)
+	Name() string
+}

@@ -17,6 +17,7 @@ const (
 	mistralURL           = "https://api.mistral.ai/v1/chat/completions"
 	hyperbolicURL        = "https://api.hyperbolic.xyz/v1/chat/completions"
 	novitaURL            = "https://api.novita.ai/v3/openai/chat/completions"
+	xaiURL               = "https://api.x.ai/v1/chat/completions"
 )
 
 // NewOllama returns a Provider for a local Ollama instance (default: localhost:11434).
@@ -134,4 +135,13 @@ func NewHyperbolic(model, apiKey string) *openai.Provider {
 // Get an API key at https://novita.ai
 func NewNovitaAI(model, apiKey string) *openai.Provider {
 	return openai.NewCompatible("novita", novitaURL, apiKey, model)
+}
+
+// NewXAI returns a Provider backed by xAI (Grok models).
+// Get an API key at https://console.x.ai
+func NewXAI(model, apiKey string) *openai.Provider {
+	if model == "" {
+		model = "grok-2-latest"
+	}
+	return openai.NewCompatible("xai", xaiURL, apiKey, model)
 }

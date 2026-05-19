@@ -132,6 +132,15 @@ type Reranker = base.Reranker
 // TextCompleter is the optional interface for legacy text completion.
 type TextCompleter = base.TextCompleter
 
+// SpeechProvider is the optional interface for text-to-speech.
+type SpeechProvider = base.SpeechProvider
+
+// SpeechRequest is the input to a text-to-speech call.
+type SpeechRequest = types.SpeechRequest
+
+// SpeechResponse is the output from a text-to-speech call.
+type SpeechResponse = types.SpeechResponse
+
 // Complete sends a blocking completion request using the given provider.
 // This is a package-level convenience wrapper around provider.Complete.
 func Complete(ctx context.Context, p Provider, req Request) (*Response, error) {
@@ -189,4 +198,9 @@ func Rerank(ctx context.Context, p Reranker, req RerankRequest) (*RerankResponse
 // TextComplete sends a legacy (non-chat) text completion request.
 func TextComplete(ctx context.Context, p TextCompleter, req TextRequest) (*TextResponse, error) {
 	return p.TextComplete(ctx, req)
+}
+
+// Speech converts text to audio using the given SpeechProvider.
+func Speech(ctx context.Context, p SpeechProvider, req SpeechRequest) (*SpeechResponse, error) {
+	return p.Speech(ctx, req)
 }

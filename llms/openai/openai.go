@@ -240,6 +240,40 @@ func (p *Provider) TextComplete(ctx context.Context, req types.TextRequest) (*ty
 	return out, nil
 }
 
+// Speech converts text to audio using the OpenAI TTS API.
+func (p *Provider) Speech(ctx context.Context, req types.SpeechRequest) (*types.SpeechResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = "tts-1"
+	}
+	voice := req.Voice
+	if voice == "" {
+		voice = "alloy"
+	}
+	format := req.ResponseFormat
+	if format == "" {
+		format = "mp3"
+	}
+	wireReq := map[string]interface{}{
+		"model":           model,
+		"input":           req.Input,
+		"voice":           voice,
+		"response_format": format,
+	}
+	if req.Speed > 0 {
+		wireReq["speed"] = req.Speed
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	audio, err := p.postURL("https://api.openai.com/v1/audio/speech", body)
+	if err != nil {
+		return nil, err
+	}
+	return &types.SpeechResponse{Audio: audio, Format: format, Provider: p.name, Model: model}, nil
+}
+
 // Stream implements base.Streamer for token-by-token output via SSE.
 func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.Delta, error) {
 	wireReq := chat.ToOAIRequest(req, p.model, true)

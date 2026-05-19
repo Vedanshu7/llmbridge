@@ -1,7 +1,7 @@
 package llmbridge
 
 // Version is the current module version.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // Default HTTP timeout for provider requests.
 const DefaultHTTPTimeout = 60 // seconds
@@ -26,6 +26,7 @@ var DefaultModels = map[string]string{
 	"mistral":    "mistral-large-latest",
 	"hyperbolic": "meta-llama/Meta-Llama-3.1-70B-Instruct",
 	"novita":     "meta-llama/llama-3.1-70b-instruct",
+	"xai":        "grok-2-latest",
 }
 
 // SupportedProviders lists the built-in provider names.
@@ -48,6 +49,7 @@ var SupportedProviders = []string{
 	"mistral",
 	"hyperbolic",
 	"novita",
+	"xai",
 }
 
 // ModelInfoDB is a static registry of known models and their capabilities.
