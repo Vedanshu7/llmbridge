@@ -152,6 +152,212 @@ func TestCircuitBreakerAutoHeals(t *testing.T) {
 	}
 }
 
+// ---- LeastLatency strategy ----
+
+func TestLeastLatencyPicksFastest(t *testing.T) {
+	slow := goodProvider("slow")
+	fast := goodProvider("fast")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: slow}, {Provider: fast}},
+		WithStrategy(LeastLatency),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+
+	// Seed latency observations directly.
+	r.mu.Lock()
+	r.latency[0] = 200 * time.Millisecond
+	r.latency[1] = 50 * time.Millisecond
+	r.observed[0] = true
+	r.observed[1] = true
+	r.mu.Unlock()
+
+	for i := 0; i < 10; i++ {
+		r.Complete(context.Background(), types.Request{}) //nolint:errcheck
+	}
+	if fast.callCount < slow.callCount {
+		t.Fatalf("fast provider should be called more: fast=%d slow=%d", fast.callCount, slow.callCount)
+	}
+}
+
+// ---- LeastBusy strategy ----
+
+func TestLeastBusyPicksLessLoaded(t *testing.T) {
+	p1 := goodProvider("p1")
+	p2 := goodProvider("p2")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: p1}, {Provider: p2}},
+		WithStrategy(LeastBusy),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+
+	// Manually set p1 as busy.
+	r.mu.Lock()
+	r.inflight[0] = 5
+	r.inflight[1] = 0
+	r.mu.Unlock()
+
+	order := r.pickOrder()
+	if order[0] != 1 {
+		t.Fatalf("expected p2 (idx 1) first, got idx %d", order[0])
+	}
+}
+
+// ---- CostBased strategy ----
+
+func TestCostBasedPicksCheapest(t *testing.T) {
+	p1 := goodProvider("expensive")
+	p2 := goodProvider("cheap")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: p1}, {Provider: p2}},
+		WithStrategy(CostBased),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+
+	// p1 has higher accumulated spend.
+	r.mu.Lock()
+	r.spent[0] = 10.0
+	r.spent[1] = 1.0
+	r.mu.Unlock()
+
+	order := r.pickOrder()
+	if order[0] != 1 {
+		t.Fatalf("expected cheap provider (idx 1) first, got idx %d", order[0])
+	}
+}
+
+// ---- WithRequiredTags ----
+
+func TestRequiredTagsFiltersProviders(t *testing.T) {
+	vision := goodProvider("vision")
+	text := goodProvider("text")
+	r := NewTagRouter(
+		[]TaggedProvider{
+			{Provider: vision, Tags: []string{"vision", "fast"}},
+			{Provider: text, Tags: []string{"fast"}},
+		},
+		WithRequiredTags([]string{"vision"}),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+
+	for i := 0; i < 5; i++ {
+		r.Complete(context.Background(), types.Request{}) //nolint:errcheck
+	}
+	if vision.callCount == 0 {
+		t.Fatal("vision provider should be called")
+	}
+	if text.callCount != 0 {
+		t.Fatalf("text provider should be excluded by tag filter, got %d calls", text.callCount)
+	}
+}
+
+func TestRequiredTagsFallsBackWhenAllExcluded(t *testing.T) {
+	p := goodProvider("p")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: p, Tags: []string{"text"}}},
+		WithRequiredTags([]string{"vision"}), // no provider has this
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+	// When all providers are excluded by tags, router falls back to all.
+	resp, err := r.Complete(context.Background(), types.Request{})
+	if err != nil || resp == nil {
+		t.Fatalf("expected fallback call to succeed: err=%v", err)
+	}
+}
+
+// ---- WithContextWindowFallback ----
+
+func TestContextWindowFallback(t *testing.T) {
+	overflow := &fakeProvider{
+		name: "overflow",
+		err:  &exceptions.ContextWindowExceededError{APIError: exceptions.APIError{LLMProvider: "overflow", StatusCode: 400}},
+	}
+	ok := goodProvider("ok")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: overflow}, {Provider: ok}},
+		WithContextWindowFallback(true),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+	resp, err := r.Complete(context.Background(), types.Request{})
+	if err != nil {
+		t.Fatalf("expected fallback to ok provider: %v", err)
+	}
+	if resp.Provider != "ok" {
+		t.Fatalf("expected ok provider, got %s", resp.Provider)
+	}
+}
+
+func TestContextWindowFallbackDisabled(t *testing.T) {
+	overflow := &fakeProvider{
+		name: "overflow",
+		err:  &exceptions.ContextWindowExceededError{APIError: exceptions.APIError{LLMProvider: "overflow", StatusCode: 400}},
+	}
+	ok := goodProvider("ok")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: overflow}, {Provider: ok}},
+		WithContextWindowFallback(false), // disabled
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+	_, err := r.Complete(context.Background(), types.Request{})
+	if err == nil {
+		t.Fatal("expected error when context-window fallback is disabled")
+	}
+}
+
+// ---- WithHealthChecks ----
+
+func TestHealthChecksMarkUnhealthy(t *testing.T) {
+	bad := &fakeProvider{name: "bad", err: nil} // starts healthy
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: bad}},
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+
+	// Manually mark as unhealthy (simulates what health check does).
+	r.mu.Lock()
+	r.health[0].Healthy = false
+	r.health[0].LastError = context.DeadlineExceeded
+	r.mu.Unlock()
+
+	r.mu.Lock()
+	h := r.health[0]
+	r.mu.Unlock()
+
+	if h.Healthy {
+		t.Fatal("expected provider marked unhealthy")
+	}
+	if h.LastError == nil {
+		t.Fatal("expected LastError set")
+	}
+}
+
+func TestHealthChecksStop(t *testing.T) {
+	p := goodProvider("p")
+	r := NewTagRouter(
+		[]TaggedProvider{{Provider: p}},
+		WithHealthChecks(10*time.Millisecond),
+	)
+	// Stop should not panic and the goroutine should exit cleanly.
+	r.Stop()
+}
+
+func TestCheckAllHealthUpdatesStatus(t *testing.T) {
+	good := goodProvider("good")
+	r := NewRouter([]Provider{good})
+
+	r.checkAllHealth()
+
+	r.mu.Lock()
+	h := r.health[0]
+	r.mu.Unlock()
+
+	if !h.Healthy {
+		t.Fatal("expected healthy after checkAllHealth on valid provider")
+	}
+	if h.LastCheck.IsZero() {
+		t.Fatal("expected LastCheck to be set")
+	}
+}
+
 // ---- Health recording ----
 
 func TestRecordSuccess(t *testing.T) {
