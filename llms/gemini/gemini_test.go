@@ -42,7 +42,7 @@ func newMockServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *P
 func TestCompleteBasic(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(okResponse("hello world"))
+		_ = json.NewEncoder(w).Encode(okResponse("hello world"))
 	})
 
 	resp, err := p.Complete(context.Background(), types.Request{
@@ -58,7 +58,7 @@ func TestCompleteBasic(t *testing.T) {
 
 func TestCompleteUsage(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(okResponse("reply"))
+		_ = json.NewEncoder(w).Encode(okResponse("reply"))
 	})
 	resp, err := p.Complete(context.Background(), types.Request{
 		Messages: []types.Message{{Role: "user", Content: "test"}},
@@ -77,7 +77,7 @@ func TestCompleteUsage(t *testing.T) {
 func TestCompleteToolCall(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"candidates": []map[string]interface{}{
 				{
 					"content": map[string]interface{}{
@@ -114,7 +114,7 @@ func TestCompleteToolCall(t *testing.T) {
 func TestCompleteHTTPError(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":{"code":401,"message":"API key not valid","status":"UNAUTHENTICATED"}}`))
+		_, _ = w.Write([]byte(`{"error":{"code":401,"message":"API key not valid","status":"UNAUTHENTICATED"}}`))
 	})
 	_, err := p.Complete(context.Background(), types.Request{
 		Messages: []types.Message{{Role: "user", Content: "hi"}},
@@ -126,7 +126,7 @@ func TestCompleteHTTPError(t *testing.T) {
 
 func TestCompleteEmptyCandidates(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"candidates": []interface{}{},
 		})
 	})
@@ -142,7 +142,7 @@ func TestCompleteURLContainsModel(t *testing.T) {
 	var requestPath string
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
-		json.NewEncoder(w).Encode(okResponse("ok"))
+		_ = json.NewEncoder(w).Encode(okResponse("ok"))
 	})
 	p.Complete(context.Background(), types.Request{ //nolint:errcheck
 		Messages: []types.Message{{Role: "user", Content: "hi"}},

@@ -40,7 +40,7 @@ func newMockServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *P
 func TestCompleteBasic(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(okResponse("hello world"))
+		_ = json.NewEncoder(w).Encode(okResponse("hello world"))
 	})
 
 	resp, err := p.Complete(context.Background(), types.Request{
@@ -56,7 +56,7 @@ func TestCompleteBasic(t *testing.T) {
 
 func TestCompleteUsage(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(okResponse("reply"))
+		_ = json.NewEncoder(w).Encode(okResponse("reply"))
 	})
 	resp, err := p.Complete(context.Background(), types.Request{
 		Messages: []types.Message{{Role: "user", Content: "test"}},
@@ -75,8 +75,8 @@ func TestCompleteUsage(t *testing.T) {
 func TestCompleteSystemMessage(t *testing.T) {
 	var captured map[string]interface{}
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&captured)
-		json.NewEncoder(w).Encode(okResponse("ok"))
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		_ = json.NewEncoder(w).Encode(okResponse("ok"))
 	})
 
 	p.Complete(context.Background(), types.Request{ //nolint:errcheck
@@ -97,7 +97,7 @@ func TestCompleteSystemMessage(t *testing.T) {
 func TestCompleteToolCall(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id": "test-id",
 			"message": map[string]interface{}{
 				"role":    "assistant",
@@ -133,7 +133,7 @@ func TestCompleteToolCall(t *testing.T) {
 func TestCompleteHTTPError(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"message":"invalid api key"}`))
+		_, _ = w.Write([]byte(`{"message":"invalid api key"}`))
 	})
 	_, err := p.Complete(context.Background(), types.Request{
 		Messages: []types.Message{{Role: "user", Content: "hi"}},
@@ -147,7 +147,7 @@ func TestCompleteAuthHeader(t *testing.T) {
 	var authHeader string
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode(okResponse("ok"))
+		_ = json.NewEncoder(w).Encode(okResponse("ok"))
 	})
 	p.Complete(context.Background(), types.Request{ //nolint:errcheck
 		Messages: []types.Message{{Role: "user", Content: "hi"}},
