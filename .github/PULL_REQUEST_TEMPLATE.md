@@ -1,31 +1,49 @@
-## Summary
+## Description
 
-<!-- What does this PR do? One or two sentences. -->
+<!-- What does this PR do? Why is this change needed? -->
+
+Fixes #<!-- issue number -->
 
 ## Type of Change
 
-- [ ] Bug fix
 - [ ] New provider
+- [ ] Bug fix
 - [ ] New feature
 - [ ] Refactor
 - [ ] Documentation
-- [ ] Chore / dependency update
-
-## Related Issue
-
-Closes #<!-- issue number -->
+- [ ] Test / chore
 
 ## Changes
 
-<!-- Bullet list of what changed and why. -->
+<!-- Bullet list of what changed and why. Be specific. -->
 
-## Checklist
+## Testing
 
+**CI runs:**
+- Branch creation CI run: <!-- paste link -->
+- Last commit CI run: <!-- paste link -->
+
+**Checklist:**
+- [ ] Added at least 1 test covering the change (`go test ./...` passes)
 - [ ] `go build ./...` passes
 - [ ] `go vet ./...` passes
-- [ ] No external dependencies added
-- [ ] New provider: `ValidateEnvironment()` implemented
-- [ ] New provider: `cost_calculation.go` added and wired into `cost_calculator.go`
-- [ ] New provider: model entries added to `constants.go`
-- [ ] Public API additions have doc comments
-- [ ] PR title follows Conventional Commits format (`feat:`, `fix:`, `docs:`, etc.)
+- [ ] `go mod tidy` — no changes to `go.mod` / `go.sum` unless intentional
+
+## Scope
+
+- [ ] This PR addresses **one specific problem** (no unrelated changes bundled in)
+
+## For New Providers
+
+- [ ] Implements `base.LLM` interface (`Name`, `Complete`)
+- [ ] `cost_calculation.go` added and wired into `cost_calculator.go`
+- [ ] Model entries added to `constants.go`
+- [ ] Streaming implemented if provider supports SSE (`base.Streamer`)
+
+## Screenshots / Proof
+
+<!-- For bug fixes: before/after. For new features: example output or test result. Delete if not applicable. -->
+
+## CLA
+
+- [ ] I have read and agree to the [Contributor License Agreement](../CLA.md)

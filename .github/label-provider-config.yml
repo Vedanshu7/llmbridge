@@ -1,0 +1,38 @@
+provider:openai:
+  - '(?i)(openai|gpt-4|gpt-3|gpt4|gpt3|o1|o3)'
+
+provider:anthropic:
+  - '(?i)(anthropic|claude)'
+
+provider:bedrock:
+  - '(?i)(bedrock|aws)'
+
+provider:gemini:
+  - '(?i)(gemini|google|vertex)'
+
+provider:cohere:
+  - '(?i)(cohere|command)'
+
+provider:mistral:
+  - '(?i)(mistral)'
+
+provider:ollama:
+  - '(?i)(ollama|local model)'
+
+provider:groq:
+  - '(?i)(groq)'
+
+provider:deepseek:
+  - '(?i)(deepseek)'
+
+component:proxy:
+  - '(?i)(proxy|router|middleware)'
+
+component:caching:
+  - '(?i)(cache|caching|disk cache)'
+
+component:streaming:
+  - '(?i)(stream|streaming|sse)'
+
+component:cost:
+  - '(?i)(cost|pricing|token count|usage)'
