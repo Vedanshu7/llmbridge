@@ -1,0 +1,14 @@
+[version]
+1
+
+[[analyzers]]
+name = "go"
+enabled = true
+
+  [analyzers.meta]
+  import_path = "github.com/Vedanshu7/llmbridge"
+  modules = ["."]
+
+[[transformers]]
+name = "gofmt"
+enabled = true
