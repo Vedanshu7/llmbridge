@@ -1274,7 +1274,6 @@ func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
 	// Check in-process store first.
 	s.batchMu.RLock()
 	rec, ok := s.batchRecords[batchID]
-	s.batchMu.RUnlock()
 	if ok {
 		completed, failed := 0, 0
 		for _, res := range rec.results {
@@ -1284,16 +1283,19 @@ func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
 				completed++
 			}
 		}
+		status, total := rec.status, rec.total
+		s.batchMu.RUnlock()
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id":     batchID,
 			"object": "batch",
-			"status": rec.status,
+			"status": status,
 			"request_counts": map[string]int{
-				"total": rec.total, "completed": completed, "failed": failed,
+				"total": total, "completed": completed, "failed": failed,
 			},
 		})
 		return
 	}
+	s.batchMu.RUnlock()
 
 	// Delegate to native provider.
 	bp, ok := s.provider.(base.BatchProvider)

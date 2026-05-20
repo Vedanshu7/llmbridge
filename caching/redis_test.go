@@ -29,7 +29,7 @@ func startFakeRedis(t *testing.T) (*fakeRedis, string) {
 	}
 	fr := &fakeRedis{data: make(map[string]string), ln: ln}
 	go fr.serve()
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	return fr, ln.Addr().String()
 }
 
@@ -44,7 +44,7 @@ func (fr *fakeRedis) serve() {
 }
 
 func (fr *fakeRedis) handleConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	r := bufio.NewReader(conn)
 	for {
 		args, err := readRESP(r)
@@ -68,16 +68,16 @@ func readRESP(r *bufio.Reader) ([]string, error) {
 		return nil, fmt.Errorf("expected array, got %q", line)
 	}
 	var n int
-	fmt.Sscanf(line[1:], "%d", &n)
+	_, _ = fmt.Sscanf(line[1:], "%d", &n)
 	args := make([]string, n)
 	for i := range n {
 		// $<len>
 		hdr, _ := r.ReadString('\n')
 		hdr = strings.TrimRight(hdr, "\r\n")
 		var slen int
-		fmt.Sscanf(hdr[1:], "%d", &slen)
+		_, _ = fmt.Sscanf(hdr[1:], "%d", &slen)
 		buf := make([]byte, slen+2) // +2 for \r\n
-		r.Read(buf)
+		_, _ = r.Read(buf)
 		args[i] = string(buf[:slen])
 	}
 	return args, nil
@@ -264,7 +264,7 @@ func TestRedisWithPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	// Auth-aware server: expects AUTH command first.
 	go func() {
@@ -272,19 +272,19 @@ func TestRedisWithPassword(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		r := bufio.NewReader(conn)
 		// Expect AUTH command.
 		args, err := readRESP(r)
 		if err != nil || len(args) < 2 || strings.ToUpper(args[0]) != "AUTH" {
-			fmt.Fprint(conn, "-ERR expected AUTH\r\n")
+			_, _ = fmt.Fprint(conn, "-ERR expected AUTH\r\n")
 			return
 		}
 		if args[1] != "secret" {
-			fmt.Fprint(conn, "-ERR invalid password\r\n")
+			_, _ = fmt.Fprint(conn, "-ERR invalid password\r\n")
 			return
 		}
-		fmt.Fprint(conn, "+OK\r\n")
+		_, _ = fmt.Fprint(conn, "+OK\r\n")
 		// Handle subsequent PING.
 		for {
 			args, err := readRESP(r)
