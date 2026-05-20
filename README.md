@@ -7,7 +7,6 @@
 [![Release](https://img.shields.io/github/v/release/Vedanshu7/llmbridge)](https://github.com/Vedanshu7/llmbridge/releases)
 [![codecov](https://codecov.io/gh/Vedanshu7/llmbridge/branch/main/graph/badge.svg)](https://codecov.io/gh/Vedanshu7/llmbridge)
 [![CodeQL](https://github.com/Vedanshu7/llmbridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/Vedanshu7/llmbridge/actions/workflows/codeql.yml)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/placeholder/badge)](https://www.bestpractices.dev)
 
 A unified Go interface to multiple LLM providers.
 
