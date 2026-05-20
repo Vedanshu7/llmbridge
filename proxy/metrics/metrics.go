@@ -11,24 +11,67 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
+
+	"github.com/Vedanshu7/llmbridge/callbacks"
 )
+
+// providerStats holds per-provider LLM call counters.
+type providerStats struct {
+	requests  atomic.Int64
+	errors    atomic.Int64
+	latencyMS atomic.Int64 // sum of latencies in ms (divide by requests for avg)
+}
 
 // Collector holds all proxy-level counters.
 type Collector struct {
-	Requests2xx    atomic.Int64
-	Requests4xx    atomic.Int64
-	Requests5xx    atomic.Int64
-	PromptTokens   atomic.Int64
+	Requests2xx      atomic.Int64
+	Requests4xx      atomic.Int64
+	Requests5xx      atomic.Int64
+	PromptTokens     atomic.Int64
 	CompletionTokens atomic.Int64
-	Errors         atomic.Int64
-	ActiveRequests atomic.Int64
+	Errors           atomic.Int64
+	ActiveRequests   atomic.Int64
+
+	providerMu    sync.RWMutex
+	providerStats map[string]*providerStats // keyed by provider name
 }
 
 // NewCollector returns a zero-valued Collector.
-func NewCollector() *Collector { return &Collector{} }
+func NewCollector() *Collector {
+	return &Collector{providerStats: make(map[string]*providerStats)}
+}
+
+func (c *Collector) statsFor(provider string) *providerStats {
+	c.providerMu.RLock()
+	s, ok := c.providerStats[provider]
+	c.providerMu.RUnlock()
+	if ok {
+		return s
+	}
+	c.providerMu.Lock()
+	if s, ok = c.providerStats[provider]; !ok {
+		s = &providerStats{}
+		c.providerStats[provider] = s
+	}
+	c.providerMu.Unlock()
+	return s
+}
+
+// RecordProviderCall records an LLM provider call result.
+// latencyMS is the call duration in milliseconds.
+func (c *Collector) RecordProviderCall(provider string, latencyMS int64, failed bool) {
+	s := c.statsFor(provider)
+	s.requests.Add(1)
+	s.latencyMS.Add(latencyMS)
+	if failed {
+		s.errors.Add(1)
+	}
+}
 
 // RecordRequest increments the counter for the given HTTP status code.
 func (c *Collector) RecordRequest(status int) {
@@ -79,6 +122,31 @@ func (c *Collector) Handler() http.HandlerFunc {
 		fmt.Fprintf(w, "# HELP llmbridge_active_requests Current in-flight requests.\n")
 		fmt.Fprintf(w, "# TYPE llmbridge_active_requests gauge\n")
 		fmt.Fprintf(w, "llmbridge_active_requests %d\n", c.ActiveRequests.Load())
+
+		c.providerMu.RLock()
+		pstats := make(map[string]*providerStats, len(c.providerStats))
+		for k, v := range c.providerStats {
+			pstats[k] = v
+		}
+		c.providerMu.RUnlock()
+
+		if len(pstats) > 0 {
+			fmt.Fprintf(w, "# HELP llmbridge_provider_requests_total Total LLM calls per provider.\n")
+			fmt.Fprintf(w, "# TYPE llmbridge_provider_requests_total counter\n")
+			for p, s := range pstats {
+				fmt.Fprintf(w, "llmbridge_provider_requests_total{provider=%q} %d\n", p, s.requests.Load())
+			}
+			fmt.Fprintf(w, "# HELP llmbridge_provider_errors_total Total LLM errors per provider.\n")
+			fmt.Fprintf(w, "# TYPE llmbridge_provider_errors_total counter\n")
+			for p, s := range pstats {
+				fmt.Fprintf(w, "llmbridge_provider_errors_total{provider=%q} %d\n", p, s.errors.Load())
+			}
+			fmt.Fprintf(w, "# HELP llmbridge_provider_latency_ms_total Sum of LLM call latencies per provider (ms).\n")
+			fmt.Fprintf(w, "# TYPE llmbridge_provider_latency_ms_total counter\n")
+			for p, s := range pstats {
+				fmt.Fprintf(w, "llmbridge_provider_latency_ms_total{provider=%q} %d\n", p, s.latencyMS.Load())
+			}
+		}
 	}
 }
 
@@ -91,6 +159,24 @@ func (c *Collector) Middleware(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		c.RecordRequest(rec.status)
 	})
+}
+
+// CallbackHandler returns a callbacks.Handler that records per-provider LLM call
+// metrics into this Collector. Register it with a callbacks.Manager to keep the
+// /metrics endpoint accurate without any extra plumbing.
+func (c *Collector) CallbackHandler() callbacks.Handler {
+	return func(_ context.Context, event callbacks.Event) {
+		switch event.Type {
+		case callbacks.EventResponse:
+			c.RecordProviderCall(event.Provider, event.Duration.Milliseconds(), false)
+			if event.Response != nil && event.Response.Usage != nil {
+				c.RecordTokens(event.Response.Usage.PromptTokens, event.Response.Usage.CompletionTokens)
+			}
+		case callbacks.EventError:
+			c.RecordProviderCall(event.Provider, event.Duration.Milliseconds(), true)
+			c.RecordError()
+		}
+	}
 }
 
 type statusRecorder struct {

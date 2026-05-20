@@ -230,3 +230,108 @@ func TestResolveModelUnknownProvider(t *testing.T) {
 		t.Fatalf("expected empty string for unknown provider, got %s", got)
 	}
 }
+
+// ---- Complete (package-level wrapper) ----
+
+func TestCompleteWrapper(t *testing.T) {
+	p := &stubProvider{name: "openai", resp: &types.Response{Content: "wrapped"}}
+	resp, err := Complete(context.Background(), p, types.Request{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Content != "wrapped" {
+		t.Errorf("Content = %q, want wrapped", resp.Content)
+	}
+}
+
+// ---- AComplete ----
+
+func TestACompleteSuccess(t *testing.T) {
+	p := &stubProvider{name: "openai", resp: &types.Response{Content: "async"}}
+	ch := AComplete(context.Background(), p, types.Request{})
+	result := <-ch
+	if result.Err != nil {
+		t.Fatalf("unexpected error: %v", result.Err)
+	}
+	if result.Response.Content != "async" {
+		t.Errorf("Content = %q, want async", result.Response.Content)
+	}
+}
+
+func TestACompleteError(t *testing.T) {
+	errProvider := &errStubProvider{name: "bad", err: context.DeadlineExceeded}
+	ch := AComplete(context.Background(), errProvider, types.Request{})
+	result := <-ch
+	if result.Err == nil {
+		t.Fatal("expected error from AComplete")
+	}
+	if result.Response != nil {
+		t.Fatal("expected nil response on error")
+	}
+}
+
+// ---- BatchComplete ----
+
+func TestBatchCompleteOrdered(t *testing.T) {
+	p := &stubProvider{name: "openai", resp: &types.Response{Content: "ok"}}
+	reqs := make([]types.Request, 5)
+	for i := range reqs {
+		reqs[i] = types.Request{Messages: []types.Message{{Role: "user", Content: string(rune('a' + i))}}}
+	}
+	results := BatchComplete(context.Background(), p, reqs)
+	if len(results) != 5 {
+		t.Fatalf("expected 5 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r.Index != i {
+			t.Errorf("results[%d].Index = %d, want %d", i, r.Index, i)
+		}
+		if r.Err != nil {
+			t.Errorf("results[%d].Err = %v", i, r.Err)
+		}
+	}
+}
+
+func TestBatchCompleteEmpty(t *testing.T) {
+	p := &stubProvider{name: "openai", resp: &types.Response{Content: "ok"}}
+	results := BatchComplete(context.Background(), p, nil)
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for empty input, got %d", len(results))
+	}
+}
+
+// ---- Embed wrapper ----
+
+type fakeEmbedder struct {
+	name   string
+	result [][]float64
+	err    error
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, _ []string) ([][]float64, error) {
+	return f.result, f.err
+}
+func (f *fakeEmbedder) Name() string { return f.name }
+
+func TestEmbedWrapper(t *testing.T) {
+	e := &fakeEmbedder{name: "openai", result: [][]float64{{0.1, 0.2, 0.3}}}
+	got, err := Embed(context.Background(), e, []string{"hello"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || len(got[0]) != 3 {
+		t.Fatalf("unexpected result: %v", got)
+	}
+}
+
+// errStubProvider always returns an error.
+type errStubProvider struct {
+	name string
+	err  error
+}
+
+func (e *errStubProvider) Complete(_ context.Context, _ types.Request) (*types.Response, error) {
+	return nil, e.err
+}
+func (e *errStubProvider) Name() string              { return e.name }
+func (e *errStubProvider) ValidateEnvironment() error { return nil }

@@ -60,32 +60,30 @@ func (mr *ModelRegistry) ListModels() map[string]ModelInfo {
 // HandleList handles GET /admin/models — returns all registered models.
 func (mr *ModelRegistry) HandleList(w http.ResponseWriter, r *http.Request) {
 	models := mr.ListModels()
-
-	// Return in OpenAI /v1/models format.
 	type modelObj struct {
-		ID     string `json:"id"`
-		Object string `json:"object"`
+		Name     string `json:"name"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
 	}
-	var data []modelObj
-	for name := range models {
-		data = append(data, modelObj{ID: name, Object: "model"})
+	data := make([]modelObj, 0, len(models))
+	for name, info := range models {
+		data = append(data, modelObj{Name: name, Provider: info.Provider, Model: info.Model})
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"object": "list",
-		"data":   data,
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": data})
 }
 
 // HandleRegister handles POST /admin/models — registers a new model.
+// Accepts a flat body: {"name":"gpt-4o","provider":"openai","model":"gpt-4o-2024-08-06"}.
 func (mr *ModelRegistry) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name string    `json:"name"`
-		Info ModelInfo `json:"info"`
+		Name     string `json:"name"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name field required"})
 		return
 	}
-	mr.RegisterModel(body.Name, body.Info)
+	mr.RegisterModel(body.Name, ModelInfo{Provider: body.Provider, Model: body.Model})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "registered", "name": body.Name})
 }

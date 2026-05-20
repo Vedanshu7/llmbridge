@@ -57,6 +57,46 @@ type Config struct {
 
 	// Orgs pre-defines organizations and their teams.
 	Orgs []OrgEntry `json:"orgs,omitempty"`
+
+	// Secrets configures an external secret backend for loading provider API keys.
+	// When set, the Mappings field maps env-var names to secret paths in the backend.
+	// Example: {"OPENAI_API_KEY": "prod/openai-key"}
+	Secrets *SecretConfig `json:"secrets,omitempty"`
+
+	// OIDC configures SSO/OIDC authentication for the admin UI.
+	OIDC *OIDCConfig `json:"oidc,omitempty"`
+}
+
+// SecretConfig specifies an external secret backend.
+type SecretConfig struct {
+	// Backend selects the secret store: "aws", "gcp", or "vault".
+	Backend string `json:"backend"`
+
+	// Options are backend-specific settings (e.g. region, project_id, vault_addr).
+	Options map[string]string `json:"options,omitempty"`
+
+	// Mappings maps environment variable names to secret paths in the backend.
+	// On startup each mapping is resolved and the result is set as an env var.
+	Mappings map[string]string `json:"mappings,omitempty"`
+}
+
+// OIDCConfig configures SSO authentication via an external identity provider.
+type OIDCConfig struct {
+	// Provider selects the identity provider: "google", "github", or "microsoft".
+	Provider string `json:"provider"`
+
+	// ClientID is the OAuth2 application client ID.
+	ClientID string `json:"client_id"`
+
+	// ClientSecret is the OAuth2 application client secret.
+	ClientSecret string `json:"client_secret"`
+
+	// RedirectURL is the callback URL registered with the identity provider.
+	// Example: "http://localhost:8080/auth/callback"
+	RedirectURL string `json:"redirect_url"`
+
+	// TenantID is required for Microsoft/Entra (the Azure AD tenant GUID or domain).
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 // OrgEntry defines an organization and its teams for the config file.

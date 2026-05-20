@@ -1,0 +1,9 @@
+apiVersion: v2
+name: llmbridge
+description: OpenAI-compatible LLM proxy with multi-provider routing
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Vedanshu7/llmbridge
+sources:
+  - https://github.com/Vedanshu7/llmbridge

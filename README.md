@@ -228,19 +228,131 @@ fmt.Println("API key:", key)
 srv.Start(ctx, ":8080")
 ```
 
+**With SQLite persistence** — keys, orgs, and spend survive restarts:
+
+```go
+srv, err := proxy.NewServerWithDB(backend, "/data/llmbridge.db")
+```
+
+Or via the CLI:
+
+```bash
+llmbridge server -config config.json -db /data/llmbridge.db
+```
+
 **Proxy endpoints:**
 
-| Method | Path | Auth |
-|---|---|---|
-| `GET` | `/health` | public |
-| `GET` | `/v1/models` | key |
-| `POST` | `/v1/chat/completions` | key |
-| `POST` | `/v1/embeddings` | key |
-| `POST` | `/admin/key/generate` | admin |
-| `DELETE` | `/admin/key/delete` | admin |
-| `GET` | `/admin/keys` | admin |
-| `GET/POST` | `/admin/models` | admin |
-| `GET/POST` | `/admin/router` | admin |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | public | Liveness check |
+| `GET` | `/metrics` | public | Prometheus text metrics |
+| `GET` | `/v1/models` | key | List registered models |
+| `POST` | `/v1/chat/completions` | key | Chat completion (streaming supported) |
+| `POST` | `/v1/responses` | key | OpenAI Responses API |
+| `POST` | `/v1/embeddings` | key | Vector embeddings |
+| `POST` | `/v1/audio/speech` | key | Text-to-speech |
+| `POST` | `/v1/batches` | key | Create batch job |
+| `GET` | `/v1/batches/{id}` | key | Batch status |
+| `POST` | `/v1/batches/{id}/cancel` | key | Cancel batch |
+| `GET` | `/auth/login?provider=google\|github\|microsoft` | public | Start SSO flow |
+| `GET` | `/auth/callback` | public | SSO callback |
+| `GET` | `/admin/ui` | public | Web admin interface |
+| `GET` | `/admin/stats` | admin | Aggregated metrics |
+| `POST` | `/admin/key/generate` | admin | Create API key |
+| `DELETE` | `/admin/key/delete` | admin | Delete API key |
+| `GET` | `/admin/keys` | admin | List API keys |
+| `GET/POST` | `/admin/models` | admin | List / register models |
+| `GET/POST` | `/admin/router` | admin | List / deploy router configs |
+| `GET/POST` | `/admin/aliases` | admin | Model name aliases |
+| `GET/POST` | `/admin/orgs` | admin | Organizations |
+| `GET/POST` | `/admin/teams` | admin | Teams |
+
+**From a JSON config file:**
+
+```json
+{
+  "listen_addr": ":8080",
+  "jwt_secret": "change-me",
+  "admin_keys": ["llmb-your-admin-key"],
+  "log_file": "/var/log/llmbridge.log",
+  "cache_ttl_seconds": 300,
+  "models": [
+    {"name": "gpt-4o", "provider": "openai", "model": "gpt-4o"},
+    {"name": "sonnet", "provider": "anthropic", "model": "claude-sonnet-4-6"}
+  ],
+  "aliases": {"fast": "gpt-4o"},
+  "router": {"strategy": "round_robin", "retries": 2},
+  "guardrails": {
+    "max_input_length": 100000,
+    "block_pii": true,
+    "block_prompt_injection": true
+  },
+  "oidc": {
+    "provider": "google",
+    "client_id": "...",
+    "client_secret": "...",
+    "redirect_url": "http://localhost:8080/auth/callback"
+  },
+  "secrets": {
+    "backend": "vault",
+    "options": {"vault_addr": "http://vault:8200"},
+    "mappings": {"OPENAI_API_KEY": "prod/openai-key"}
+  },
+  "orgs": [
+    {"name": "Acme", "budget": 500, "teams": [{"name": "Engineering", "budget": 200}]}
+  ]
+}
+```
+
+**Semantic caching** — cache hits on semantically similar queries:
+
+```go
+import (
+    "github.com/Vedanshu7/llmbridge/caching"
+    "github.com/Vedanshu7/llmbridge/llms/openai"
+)
+
+embedder := openai.New("text-embedding-3-small", key)
+sc := caching.NewSemanticCache(caching.NewInMemoryCache(), embedder, 0.95)
+srv.SetCache(sc, 5*time.Minute)
+```
+
+**Typed failover** — route around context-window or content-policy errors:
+
+```go
+router := llmbridge.NewRouter(providers,
+    llmbridge.WithContextWindowFallback(true),
+    llmbridge.WithContentPolicyFallback(true),
+)
+```
+
+**Observability:**
+
+```go
+import (
+    "github.com/Vedanshu7/llmbridge/callbacks"
+    "github.com/Vedanshu7/llmbridge/proxy/metrics"
+)
+
+// Langfuse tracing
+mgr := callbacks.NewManager()
+mgr.Register(callbacks.LangfuseHandler(publicKey, secretKey, "https://cloud.langfuse.com", nil))
+
+// Prometheus — also exposes /metrics endpoint automatically
+collector := metrics.NewCollector()
+mgr.Register(collector.CallbackHandler())
+```
+
+**Docker:**
+
+```bash
+docker compose up
+# or
+docker run -p 8080:8080 \
+  -e OPENAI_API_KEY \
+  -v ./config.json:/config.json:ro \
+  ghcr.io/vedanshu7/llmbridge server -config /config.json
+```
 
 ## Error Handling
 

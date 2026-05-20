@@ -68,13 +68,30 @@ type UsageData struct {
 	CacheReadTokens  int
 }
 
+// ContentPart is one element of a multi-part message (text or image).
+type ContentPart struct {
+	// Type is "text" or "image_url".
+	Type string
+
+	// Text holds the part's text when Type == "text".
+	Text string
+
+	// ImageURL is the URL (or data URI) of the image when Type == "image_url".
+	ImageURL string
+}
+
 // Message is a single turn in a conversation.
 type Message struct {
 	// Role is one of: "user", "assistant", "tool".
 	Role string
 
-	// Content is the text content of the message.
+	// Content is the text content of the message (used when Parts is empty).
 	Content string
+
+	// Parts holds multi-modal content (text + images). When non-empty, Content
+	// is derived from the text parts and individual providers receive the full
+	// parts list including images.
+	Parts []ContentPart
 
 	// ToolCallID links a "tool" role message to the ToolCall that requested it.
 	ToolCallID string

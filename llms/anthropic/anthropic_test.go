@@ -3,10 +3,13 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/Vedanshu7/llmbridge/exceptions"
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
@@ -154,5 +157,126 @@ func TestCompleteToolResultMerging(t *testing.T) {
 	content, _ := last["content"].([]interface{})
 	if len(content) != 2 {
 		t.Fatalf("expected 2 tool_result blocks, got %d", len(content))
+	}
+}
+
+// ---- Name / ValidateEnvironment ----
+
+func TestName(t *testing.T) {
+	p := New("", "key")
+	if p.Name() != "anthropic" {
+		t.Errorf("Name() = %q, want anthropic", p.Name())
+	}
+}
+
+func TestDefaultModel(t *testing.T) {
+	p := New("", "key")
+	if p.model != defaultModel {
+		t.Errorf("model = %q, want %q", p.model, defaultModel)
+	}
+}
+
+func TestValidateEnvironmentMissingKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	p := New("claude-sonnet-4-6", "")
+	if err := p.ValidateEnvironment(); err == nil {
+		t.Fatal("expected error when key is empty and env not set")
+	}
+}
+
+func TestValidateEnvironmentFromEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "env-key")
+	p := New("claude-sonnet-4-6", "")
+	if err := p.ValidateEnvironment(); err != nil {
+		t.Fatalf("unexpected error when key is in env: %v", err)
+	}
+}
+
+// ---- Stream ----
+
+func TestStreamSuccess(t *testing.T) {
+	// Anthropic SSE format
+	sseBody := "event: content_block_delta\n" +
+		`data: {"delta":{"type":"text_delta","text":"hello "}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"delta":{"type":"text_delta","text":"world"}}` + "\n\n" +
+		"event: message_stop\n" +
+		"data: {}\n\n"
+
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sseBody))
+	})
+
+	ch, err := p.Stream(context.Background(), types.Request{
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var got strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatalf("stream error: %v", d.Err)
+		}
+		got.WriteString(d.Content)
+		if d.Done {
+			break
+		}
+	}
+	if got.String() != "hello world" {
+		t.Errorf("streamed content = %q, want %q", got.String(), "hello world")
+	}
+}
+
+func TestStreamHTTPError(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+	_, err := p.Stream(context.Background(), types.Request{
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	var authErr *exceptions.AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("expected AuthenticationError, got %T: %v", err, err)
+	}
+}
+
+// ---- CostForResponse ----
+
+func TestCostForResponseKnown(t *testing.T) {
+	resp := &types.Response{
+		Model:    "claude-sonnet-4-6",
+		Provider: "anthropic",
+		Usage:    &types.UsageData{PromptTokens: 1000, CompletionTokens: 500},
+	}
+	cost, err := CostForResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cost <= 0 {
+		t.Errorf("expected positive cost, got %f", cost)
+	}
+}
+
+func TestCostForResponseNilUsage(t *testing.T) {
+	resp := &types.Response{Model: "claude-sonnet-4-6", Provider: "anthropic"}
+	_, err := CostForResponse(resp)
+	if err == nil {
+		t.Fatal("expected error for nil usage")
+	}
+}
+
+func TestCostForResponseUnknownModel(t *testing.T) {
+	resp := &types.Response{
+		Model:    "claude-unknown-xyz",
+		Provider: "anthropic",
+		Usage:    &types.UsageData{PromptTokens: 100, CompletionTokens: 50},
+	}
+	_, err := CostForResponse(resp)
+	if err == nil {
+		t.Fatal("expected error for unknown model")
 	}
 }

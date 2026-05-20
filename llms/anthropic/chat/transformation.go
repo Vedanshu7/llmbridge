@@ -24,14 +24,23 @@ type AntMessage struct {
 	Content interface{} `json:"content"` // string | []AntBlock
 }
 
+// AntImageSource describes the source of an image block.
+type AntImageSource struct {
+	Type      string `json:"type"`            // "url" or "base64"
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+}
+
 type AntBlock struct {
-	Type      string      `json:"type"`
-	Text      string      `json:"text,omitempty"`
-	ID        string      `json:"id,omitempty"`
-	Name      string      `json:"name,omitempty"`
-	Input     interface{} `json:"input,omitempty"`
-	ToolUseID string      `json:"tool_use_id,omitempty"`
-	Content   string      `json:"content,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     interface{}     `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Source    *AntImageSource `json:"source,omitempty"` // for type=="image"
 }
 
 type AntTool struct {
@@ -144,7 +153,12 @@ func ToAntMessages(msgs []types.Message) []AntMessage {
 		m := msgs[i]
 		switch m.Role {
 		case "user":
-			out = append(out, AntMessage{Role: "user", Content: m.Content})
+			if len(m.Parts) > 0 {
+				blocks := partsToAntBlocks(m.Parts)
+				out = append(out, AntMessage{Role: "user", Content: blocks})
+			} else {
+				out = append(out, AntMessage{Role: "user", Content: m.Content})
+			}
 			i++
 
 		case "assistant":
@@ -184,6 +198,23 @@ func ToAntMessages(msgs []types.Message) []AntMessage {
 
 		default:
 			i++
+		}
+	}
+	return out
+}
+
+// partsToAntBlocks converts ContentParts to Anthropic content blocks.
+func partsToAntBlocks(parts []types.ContentPart) []AntBlock {
+	out := make([]AntBlock, 0, len(parts))
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			out = append(out, AntBlock{Type: "text", Text: p.Text})
+		case "image_url":
+			out = append(out, AntBlock{
+				Type:   "image",
+				Source: &AntImageSource{Type: "url", URL: p.ImageURL},
+			})
 		}
 	}
 	return out

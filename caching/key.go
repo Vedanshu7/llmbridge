@@ -10,6 +10,21 @@ import (
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
+// QueryText extracts the last user-role message text from req for use as the
+// semantic cache lookup key. Falls back to the first message if no user message
+// is found.
+func QueryText(req types.Request) string {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			return req.Messages[i].Content
+		}
+	}
+	if len(req.Messages) > 0 {
+		return req.Messages[0].Content
+	}
+	return req.System
+}
+
 // GenerateCacheKey produces a deterministic hex string from the fields of req
 // that affect the LLM output. Two requests with the same key will produce the
 // same response (assuming a deterministic provider).

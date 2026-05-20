@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	baseURL      = "https://generativelanguage.googleapis.com/v1beta/models"
-	defaultModel = "gemini-2.0-flash"
+	baseURL           = "https://generativelanguage.googleapis.com/v1beta/models"
+	defaultModel      = "gemini-2.0-flash"
+	defaultEmbedModel = "text-embedding-004"
 )
 
 // Provider calls the Google Gemini generateContent API.
@@ -89,6 +90,54 @@ func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.
 		chat.ReadSSE(ctx, p.Name(), resp.Body, ch)
 	}()
 	return ch, nil
+}
+
+// Embed implements base.EmbedProvider using the Gemini batchEmbedContents endpoint.
+// The default model is text-embedding-004.
+func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+	base := baseURL
+	if p.apiBaseURL != "" {
+		base = p.apiBaseURL
+	}
+	url := fmt.Sprintf("%s/%s:batchEmbedContents?key=%s", base, defaultEmbedModel, p.apiKey)
+
+	type embedContent struct {
+		Model   string `json:"model"`
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	}
+	reqs := make([]embedContent, len(texts))
+	for i, t := range texts {
+		reqs[i].Model = "models/" + defaultEmbedModel
+		reqs[i].Content.Parts = []struct {
+			Text string `json:"text"`
+		}{{Text: t}}
+	}
+	wireReq := map[string]interface{}{"requests": reqs}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postRaw(url, body)
+	if err != nil {
+		return nil, err
+	}
+	var wire struct {
+		Embeddings []struct {
+			Values []float64 `json:"values"`
+		} `json:"embeddings"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "parse embeddings: "+err.Error(), err)
+	}
+	out := make([][]float64, len(wire.Embeddings))
+	for i, e := range wire.Embeddings {
+		out[i] = e.Values
+	}
+	return out, nil
 }
 
 func (p *Provider) generateContentURL() string {

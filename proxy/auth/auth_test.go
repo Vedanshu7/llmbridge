@@ -1,11 +1,15 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Vedanshu7/llmbridge/proxy/persistence"
 )
 
 // ---- APIKeyStore ----
@@ -305,5 +309,186 @@ func TestKeyOrgTeamAssociation(t *testing.T) {
 	}
 	if info.OrgID != "org_123" || info.TeamID != "team_456" {
 		t.Fatalf("unexpected org/team: %s / %s", info.OrgID, info.TeamID)
+	}
+}
+
+// ---- APIKeyFromContext ----
+
+func TestAPIKeyFromContextPresent(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxKeyAPIKey{}, "my-key")
+	got := APIKeyFromContext(ctx)
+	if got != "my-key" {
+		t.Errorf("APIKeyFromContext = %q, want my-key", got)
+	}
+}
+
+func TestAPIKeyFromContextMissing(t *testing.T) {
+	got := APIKeyFromContext(context.Background())
+	if got != "" {
+		t.Errorf("APIKeyFromContext = %q, want empty", got)
+	}
+}
+
+// ---- RequireScope ----
+
+func TestRequireScopeAllowed(t *testing.T) {
+	s := NewAPIKeyStore()
+	key, _ := s.GenerateAPIKey([]string{"admin"})
+
+	h := RequireScope(s, "admin")(http.HandlerFunc(okHandler))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestRequireScopeForbidden(t *testing.T) {
+	s := NewAPIKeyStore()
+	key, _ := s.GenerateAPIKey([]string{"completion"})
+
+	h := RequireScope(s, "admin")(http.HandlerFunc(okHandler))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestRequireScopeMissingHeader(t *testing.T) {
+	s := NewAPIKeyStore()
+	h := RequireScope(s, "admin")(http.HandlerFunc(okHandler))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+// ---- DB-backed store ----
+
+func TestAPIKeyStoreWithDBRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := persistence.Open(path)
+	if err != nil {
+		t.Fatalf("persistence.Open: %v", err)
+	}
+	if err := persistence.Migrate(db); err != nil {
+		t.Fatalf("persistence.Migrate: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	s, err := NewAPIKeyStoreWithDB(db)
+	if err != nil {
+		t.Fatalf("NewAPIKeyStoreWithDB: %v", err)
+	}
+
+	key, err := s.GenerateAPIKey([]string{"completion"})
+	if err != nil {
+		t.Fatalf("GenerateAPIKey: %v", err)
+	}
+
+	// Create a new store from the same DB — the key must survive.
+	s2, err := NewAPIKeyStoreWithDB(db)
+	if err != nil {
+		t.Fatalf("NewAPIKeyStoreWithDB (reload): %v", err)
+	}
+	info, ok := s2.ValidateAPIKey(key)
+	if !ok || info == nil {
+		t.Fatal("expected key to persist across store reload")
+	}
+	if len(info.Scopes) != 1 || info.Scopes[0] != "completion" {
+		t.Errorf("unexpected scopes: %v", info.Scopes)
+	}
+}
+
+func TestOrgStoreWithDBRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := persistence.Open(path)
+	if err != nil {
+		t.Fatalf("persistence.Open: %v", err)
+	}
+	if err := persistence.Migrate(db); err != nil {
+		t.Fatalf("persistence.Migrate: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	s, err := NewOrgStoreWithDB(db)
+	if err != nil {
+		t.Fatalf("NewOrgStoreWithDB: %v", err)
+	}
+
+	org, err := s.CreateOrg("acme", 500.0)
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	// Reload from same DB.
+	s2, err := NewOrgStoreWithDB(db)
+	if err != nil {
+		t.Fatalf("NewOrgStoreWithDB (reload): %v", err)
+	}
+	got, ok := s2.GetOrg(org.ID)
+	if !ok {
+		t.Fatal("expected org to persist across store reload")
+	}
+	if got.Name != "acme" || got.Budget != 500.0 {
+		t.Errorf("unexpected org: %+v", got)
+	}
+}
+
+// ---- RoutePolicy ----
+
+func TestRequiredScopeExactMatch(t *testing.T) {
+	if s := RequiredScope("/v1/chat/completions"); s != "" {
+		t.Errorf("got %q, want empty", s)
+	}
+}
+
+func TestRequiredScopePrefixMatch(t *testing.T) {
+	if s := RequiredScope("/admin/keys"); s != "admin" {
+		t.Errorf("got %q, want admin", s)
+	}
+}
+
+func TestRequiredScopeUnknown(t *testing.T) {
+	if s := RequiredScope("/v1/unknown"); s != "" {
+		t.Errorf("got %q, want empty", s)
+	}
+}
+
+func TestCheckRouteAuthValid(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"completion"})
+	if !CheckRouteAuth(store, key, "/v1/chat/completions") {
+		t.Error("expected true for valid key on open route")
+	}
+}
+
+func TestCheckRouteAuthAdminDenied(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"completion"}) // no admin scope
+	if CheckRouteAuth(store, key, "/admin/keys") {
+		t.Error("expected false: completion key must not access admin route")
+	}
+}
+
+func TestCheckRouteAuthAdminAllowed(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"admin", "completion"})
+	if !CheckRouteAuth(store, key, "/admin/keys") {
+		t.Error("expected true for admin key on admin route")
+	}
+}
+
+func TestCheckRouteAuthInvalidKey(t *testing.T) {
+	store := NewAPIKeyStore()
+	if CheckRouteAuth(store, "bad-key", "/v1/chat/completions") {
+		t.Error("expected false for invalid key")
 	}
 }

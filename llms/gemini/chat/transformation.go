@@ -21,9 +21,16 @@ type GeminiContent struct {
 	Parts []GeminiPart `json:"parts"`
 }
 
-// GeminiPart is a text fragment within a content block.
+// GeminiFileData carries an image or file reference by URL.
+type GeminiFileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
+}
+
+// GeminiPart is a text or media fragment within a content block.
 type GeminiPart struct {
 	Text         string              `json:"text,omitempty"`
+	FileData     *GeminiFileData     `json:"fileData,omitempty"`
 	FunctionCall *GeminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResp *GeminiFunctionResp `json:"functionResponse,omitempty"`
 }
@@ -124,7 +131,18 @@ func ToGeminiRequest(req types.Request, model string, stream bool) GeminiRequest
 			role = "model"
 		}
 		gc := GeminiContent{Role: role}
-		if m.Content != "" {
+		if len(m.Parts) > 0 {
+			for _, p := range m.Parts {
+				switch p.Type {
+				case "text":
+					gc.Parts = append(gc.Parts, GeminiPart{Text: p.Text})
+				case "image_url":
+					gc.Parts = append(gc.Parts, GeminiPart{
+						FileData: &GeminiFileData{FileURI: p.ImageURL},
+					})
+				}
+			}
+		} else if m.Content != "" {
 			gc.Parts = append(gc.Parts, GeminiPart{Text: m.Content})
 		}
 		for _, tc := range m.ToolCalls {

@@ -16,11 +16,20 @@ type OAIRequest struct {
 	Stream      bool         `json:"stream,omitempty"`
 }
 
+// OAIContentPart is one element of a multi-modal content array.
+type OAIContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url,omitempty"`
+}
+
 type OAIMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolCalls  []OAIToolCall  `json:"tool_calls,omitempty"`
+	Role       string          `json:"role"`
+	Content    interface{}     `json:"content,omitempty"` // string or []OAIContentPart
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCalls  []OAIToolCall   `json:"tool_calls,omitempty"`
 }
 
 type OAIToolCall struct {
@@ -111,8 +120,22 @@ func ToOAIRequest(req types.Request, defaultModel string, stream bool) OAIReques
 // FromOAIResponse converts an OpenAI wire response into types.Response.
 func FromOAIResponse(raw *OAIResponse, providerName, model string) *types.Response {
 	msg := raw.Choices[0].Message
+	var content string
+	switch v := msg.Content.(type) {
+	case string:
+		content = v
+	case []interface{}:
+		// Multi-part response — concatenate text parts.
+		for _, part := range v {
+			if pm, ok := part.(map[string]interface{}); ok {
+				if t, ok := pm["text"].(string); ok {
+					content += t
+				}
+			}
+		}
+	}
 	resp := &types.Response{
-		Content:  msg.Content,
+		Content:  content,
 		Provider: providerName,
 		Model:    model,
 	}
@@ -137,8 +160,21 @@ func FromOAIResponse(raw *OAIResponse, providerName, model string) *types.Respon
 func FromMessage(m types.Message) OAIMessage {
 	out := OAIMessage{
 		Role:       m.Role,
-		Content:    m.Content,
 		ToolCallID: m.ToolCallID,
+	}
+	// Use multi-part content when image parts are present.
+	if len(m.Parts) > 0 {
+		parts := make([]OAIContentPart, 0, len(m.Parts))
+		for _, p := range m.Parts {
+			cp := OAIContentPart{Type: p.Type, Text: p.Text}
+			if p.ImageURL != "" {
+				cp.ImageURL = &struct{ URL string `json:"url"` }{URL: p.ImageURL}
+			}
+			parts = append(parts, cp)
+		}
+		out.Content = parts
+	} else {
+		out.Content = m.Content
 	}
 	for _, tc := range m.ToolCalls {
 		var otc OAIToolCall

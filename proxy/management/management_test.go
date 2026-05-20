@@ -128,7 +128,7 @@ func TestModelRegistryMiss(t *testing.T) {
 
 func TestHandleRegisterModel(t *testing.T) {
 	mr := NewModelRegistry()
-	body := `{"name":"sonnet","info":{"provider":"anthropic","model":"claude-sonnet-4-6"}}`
+	body := `{"name":"sonnet","provider":"anthropic","model":"claude-sonnet-4-6"}`
 	req := httptest.NewRequest("POST", "/admin/models", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	mr.HandleRegister(w, req)
@@ -136,15 +136,18 @@ func TestHandleRegisterModel(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	_, ok := mr.GetModel("sonnet")
+	info, ok := mr.GetModel("sonnet")
 	if !ok {
 		t.Fatal("expected model to be registered")
+	}
+	if info.Provider != "anthropic" {
+		t.Fatalf("provider = %q", info.Provider)
 	}
 }
 
 func TestHandleRegisterModelMissingName(t *testing.T) {
 	mr := NewModelRegistry()
-	req := httptest.NewRequest("POST", "/admin/models", strings.NewReader(`{"info":{}}`))
+	req := httptest.NewRequest("POST", "/admin/models", strings.NewReader(`{"provider":"openai"}`))
 	w := httptest.NewRecorder()
 	mr.HandleRegister(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -154,8 +157,8 @@ func TestHandleRegisterModelMissingName(t *testing.T) {
 
 func TestHandleListModels(t *testing.T) {
 	mr := NewModelRegistry()
-	mr.RegisterModel("m1", ModelInfo{Provider: "openai"})
-	mr.RegisterModel("m2", ModelInfo{Provider: "anthropic"})
+	mr.RegisterModel("m1", ModelInfo{Provider: "openai", Model: "gpt-4o"})
+	mr.RegisterModel("m2", ModelInfo{Provider: "anthropic", Model: "claude-sonnet-4-6"})
 
 	req := httptest.NewRequest("GET", "/admin/models", nil)
 	w := httptest.NewRecorder()
@@ -165,12 +168,14 @@ func TestHandleListModels(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["object"] != "list" {
-		t.Fatalf("expected object=list, got %v", resp["object"])
+	models, ok := resp["models"].([]interface{})
+	if !ok || len(models) != 2 {
+		t.Fatalf("expected 2 models under 'models' key, got: %v", resp)
 	}
-	data, ok := resp["data"].([]interface{})
-	if !ok || len(data) != 2 {
-		t.Fatalf("expected 2 models, got: %v", resp["data"])
+	// Each entry should have name, provider, model fields.
+	first := models[0].(map[string]interface{})
+	if first["name"] == nil || first["provider"] == nil {
+		t.Fatalf("model entry missing fields: %v", first)
 	}
 }
 

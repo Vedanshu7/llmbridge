@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llmbridge admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+  header { background: #1a1f2e; border-bottom: 1px solid #2d3748; padding: 0 24px; display: flex; align-items: center; gap: 16px; height: 56px; }
+  header h1 { font-size: 1rem; font-weight: 600; color: #7c3aed; letter-spacing: 0.05em; }
+  header .spacer { flex: 1; }
+  header .key-badge { font-size: 0.75rem; color: #718096; background: #2d3748; padding: 4px 10px; border-radius: 20px; cursor: pointer; }
+  nav { display: flex; gap: 2px; padding: 0 24px; background: #1a1f2e; border-bottom: 1px solid #2d3748; }
+  nav button { background: none; border: none; color: #718096; padding: 12px 16px; font-size: 0.85rem; cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
+  nav button.active { color: #a78bfa; border-bottom-color: #7c3aed; }
+  nav button:hover:not(.active) { color: #e2e8f0; }
+  main { padding: 24px; max-width: 1100px; }
+  .tab { display: none; } .tab.active { display: block; }
+  .card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 0.9rem; font-weight: 600; color: #a0aec0; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { text-align: left; padding: 8px 12px; color: #718096; font-weight: 500; border-bottom: 1px solid #2d3748; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e2533; font-family: monospace; }
+  tr:hover td { background: #1e2533; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; }
+  .badge-green { background: #14532d; color: #86efac; }
+  .badge-blue { background: #1e3a5f; color: #93c5fd; }
+  .badge-red { background: #7f1d1d; color: #fca5a5; }
+  form.inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 12px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: #718096; }
+  input, select { background: #0f1117; border: 1px solid #2d3748; color: #e2e8f0; padding: 6px 10px; border-radius: 4px; font-size: 0.85rem; outline: none; }
+  input:focus, select:focus { border-color: #7c3aed; }
+  button.btn { background: #7c3aed; color: #fff; border: none; padding: 7px 16px; border-radius: 4px; font-size: 0.85rem; cursor: pointer; transition: background .15s; }
+  button.btn:hover { background: #6d28d9; }
+  button.btn-danger { background: #7f1d1d; }
+  button.btn-danger:hover { background: #991b1b; }
+  button.btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .stat-box { background: #0f1117; border: 1px solid #2d3748; border-radius: 6px; padding: 16px; }
+  .stat-box .val { font-size: 1.5rem; font-weight: 700; color: #a78bfa; }
+  .stat-box .lbl { font-size: 0.75rem; color: #718096; margin-top: 4px; }
+  .alert { padding: 10px 14px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 12px; }
+  .alert-err { background: #7f1d1d33; border: 1px solid #7f1d1d; color: #fca5a5; }
+  .alert-ok  { background: #14532d33; border: 1px solid #14532d; color: #86efac; }
+  .key-input { font-family: monospace; width: 100%; padding: 8px 10px; }
+  #login-screen { display: none; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 12px; }
+  #login-screen h2 { font-size: 1.2rem; color: #a78bfa; }
+  #login-screen input { width: 340px; }
+  #app { display: none; }
+</style>
+</head>
+<body>
+
+<!-- Login screen (shown when no key in localStorage) -->
+<div id="login-screen">
+  <h2>llmbridge admin</h2>
+  <p style="color:#718096;font-size:.85rem">Enter your admin API key to continue</p>
+  <input id="login-key-input" class="key-input" type="password" placeholder="llmb-…">
+  <button class="btn" onclick="doLogin()">Sign in</button>
+  <div id="login-err" class="alert alert-err" style="display:none;width:340px"></div>
+  <hr style="border-color:#2d3748;width:340px">
+  <p style="color:#718096;font-size:.8rem">Or sign in via SSO</p>
+  <div style="display:flex;gap:8px">
+    <button class="btn" onclick="ssoLogin('google')">Google</button>
+    <button class="btn" onclick="ssoLogin('github')">GitHub</button>
+    <button class="btn" onclick="ssoLogin('microsoft')">Microsoft</button>
+  </div>
+</div>
+
+<!-- Main app (shown when key present) -->
+<div id="app">
+  <header>
+    <h1>llmbridge</h1>
+    <span class="spacer"></span>
+    <span class="key-badge" title="Click to copy" onclick="copyKey()">API key: <span id="key-display">…</span></span>
+    <button class="btn btn-sm" onclick="logout()">Log out</button>
+  </header>
+  <nav>
+    <button class="active" onclick="switchTab('keys',this)">Keys</button>
+    <button onclick="switchTab('orgs',this)">Orgs &amp; Teams</button>
+    <button onclick="switchTab('models',this)">Models</button>
+    <button onclick="switchTab('router',this)">Router</button>
+    <button onclick="switchTab('metrics',this)">Metrics</button>
+    <button onclick="switchTab('aliases',this)">Aliases</button>
+    <button onclick="switchTab('prompts',this)">Prompts</button>
+    <button onclick="switchTab('webhooks',this)">Webhooks</button>
+    <button onclick="switchTab('audit',this)">Audit Log</button>
+  </nav>
+  <main>
+
+    <!-- Keys tab -->
+    <div id="tab-keys" class="tab active">
+      <div class="card">
+        <h2>Generate key</h2>
+        <form class="inline" onsubmit="generateKey(event)">
+          <label>Scopes (comma-separated)<input id="gen-scopes" value="completion" placeholder="completion,admin"></label>
+          <label>Spend limit (USD, 0=∞)<input id="gen-spend" type="number" min="0" step="0.01" value="0" style="width:120px"></label>
+          <label>TTL (hours, 0=never)<input id="gen-ttl" type="number" min="0" value="0" style="width:100px"></label>
+          <label>RPM (0=∞)<input id="gen-rpm" type="number" min="0" value="0" style="width:100px"></label>
+          <label>TPM (0=∞)<input id="gen-tpm" type="number" min="0" value="0" style="width:100px"></label>
+          <button class="btn" type="submit">Generate</button>
+        </form>
+        <div id="gen-result" style="margin-top:12px;display:none"></div>
+      </div>
+      <div class="card">
+        <h2>All keys</h2>
+        <table id="keys-table">
+          <thead><tr><th>Key</th><th>Name</th><th>Scopes</th><th>Spend</th><th>Limit</th><th>Org</th><th>Actions</th></tr></thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Orgs & Teams tab -->
+    <div id="tab-orgs" class="tab">
+      <div class="card">
+        <h2>Create org</h2>
+        <form class="inline" onsubmit="createOrg(event)">
+          <label>Name<input id="org-name" placeholder="My org"></label>
+          <label>Budget (USD, 0=∞)<input id="org-budget" type="number" min="0" step="0.01" value="0" style="width:120px"></label>
+          <button class="btn" type="submit">Create</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Create team</h2>
+        <form class="inline" onsubmit="createTeam(event)">
+          <label>Org ID<input id="team-org-id" placeholder="org_…"></label>
+          <label>Name<input id="team-name" placeholder="Engineering"></label>
+          <label>Budget (USD, 0=∞)<input id="team-budget" type="number" min="0" step="0.01" value="0" style="width:120px"></label>
+          <button class="btn" type="submit">Create</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Orgs</h2>
+        <table><thead><tr><th>ID</th><th>Name</th><th>Budget</th><th>Spend</th></tr></thead>
+        <tbody id="orgs-body"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Teams</h2>
+        <table><thead><tr><th>ID</th><th>Org</th><th>Name</th><th>Budget</th><th>Spend</th></tr></thead>
+        <tbody id="teams-body"></tbody></table>
+      </div>
+    </div>
+
+    <!-- Models tab -->
+    <div id="tab-models" class="tab">
+      <div class="card">
+        <h2>Register model</h2>
+        <form class="inline" onsubmit="registerModel(event)">
+          <label>Name<input id="model-name" placeholder="gpt-4o"></label>
+          <label>Provider<input id="model-provider" placeholder="openai"></label>
+          <label>Backend model<input id="model-backend" placeholder="gpt-4o-2024-08-06"></label>
+          <button class="btn" type="submit">Register</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Registered models</h2>
+        <table><thead><tr><th>Name</th><th>Provider</th><th>Model</th></tr></thead>
+        <tbody id="models-body"></tbody></table>
+      </div>
+    </div>
+
+    <!-- Router tab -->
+    <div id="tab-router" class="tab">
+      <div class="card">
+        <h2>Active configurations</h2>
+        <table><thead><tr><th>Model</th><th>Strategy</th><th>Providers</th></tr></thead>
+        <tbody id="router-body"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Deploy configuration</h2>
+        <form class="inline" onsubmit="deployRouter(event)">
+          <label>Model key<input id="router-model" placeholder="gpt-4o"></label>
+          <label>Strategy
+            <select id="router-strategy">
+              <option>priority</option><option>round_robin</option><option>least_latency</option>
+              <option>least_busy</option><option>cost_based</option>
+            </select>
+          </label>
+          <label>Providers (comma-separated)<input id="router-providers" placeholder="openai,anthropic"></label>
+          <button class="btn" type="submit">Deploy</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Metrics tab -->
+    <div id="tab-metrics" class="tab">
+      <div class="stat-grid" id="metrics-grid">
+        <div class="stat-box"><div class="val" id="m-requests">…</div><div class="lbl">Total requests</div></div>
+        <div class="stat-box"><div class="val" id="m-tokens">…</div><div class="lbl">Total tokens</div></div>
+        <div class="stat-box"><div class="val" id="m-keys">…</div><div class="lbl">Active keys</div></div>
+        <div class="stat-box"><div class="val" id="m-orgs">…</div><div class="lbl">Orgs</div></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Raw Prometheus metrics</h2>
+        <pre id="raw-metrics" style="font-size:.75rem;color:#718096;white-space:pre-wrap;max-height:400px;overflow:auto"></pre>
+      </div>
+    </div>
+
+    <!-- Aliases tab -->
+    <div id="tab-aliases" class="tab">
+      <div class="card">
+        <h2>Set alias</h2>
+        <form class="inline" onsubmit="setAlias(event)">
+          <label>Alias<input id="alias-name" placeholder="gpt4"></label>
+          <label>Canonical model<input id="alias-model" placeholder="gpt-4o"></label>
+          <button class="btn" type="submit">Set</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Aliases</h2>
+        <table><thead><tr><th>Alias</th><th>Model</th></tr></thead>
+        <tbody id="aliases-body"></tbody></table>
+      </div>
+    </div>
+
+    <!-- Prompts tab -->
+    <div id="tab-prompts" class="tab">
+      <div class="card">
+        <h2>Create prompt</h2>
+        <form class="inline" onsubmit="createPrompt(event)">
+          <label>Name<input id="prompt-name" placeholder="greeting"></label>
+          <label>Variables (comma-sep)<input id="prompt-vars" placeholder="name,tone"></label>
+          <button class="btn" type="submit">Create</button>
+        </form>
+        <div style="margin-top:12px">
+          <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:#718096">Template</label>
+          <textarea id="prompt-template" rows="3" placeholder="Hello {{name}}!" style="width:100%;background:#1a1f2e;color:#e2e8f0;border:1px solid #2d3748;border-radius:4px;padding:8px;font-family:monospace;resize:vertical"></textarea>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Render prompt</h2>
+        <form class="inline" onsubmit="renderPrompt(event)">
+          <label>Prompt ID<input id="render-id" placeholder="prompt id"></label>
+          <label>Vars (JSON)<input id="render-vars" placeholder='{"name":"Alice"}'></label>
+          <button class="btn" type="submit">Render</button>
+        </form>
+        <pre id="render-result" style="margin-top:8px;background:#1a1f2e;padding:12px;border-radius:4px;white-space:pre-wrap;display:none"></pre>
+      </div>
+      <div class="card">
+        <h2>Stored prompts</h2>
+        <table>
+          <thead><tr><th>ID</th><th>Name</th><th>Version</th><th>Variables</th><th></th></tr></thead>
+          <tbody id="prompts-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Webhooks tab -->
+    <div id="tab-webhooks" class="tab">
+      <div class="card">
+        <h2>Register webhook</h2>
+        <form class="inline" onsubmit="registerWebhook(event)">
+          <label>URL<input id="wh-url" placeholder="https://example.com/hook"></label>
+          <label>Org ID (leave blank for all)<input id="wh-org" placeholder="optional"></label>
+          <label>Events
+            <select id="wh-events" style="background:#1a1f2e;color:#e2e8f0;border:1px solid #2d3748;border-radius:4px;padding:6px">
+              <option value="all">All</option>
+              <option value="completion">Completion only</option>
+              <option value="error">Error only</option>
+              <option value="request">Request only</option>
+            </select>
+          </label>
+          <label>Secret (HMAC, optional)<input id="wh-secret" type="password" placeholder="optional"></label>
+          <button class="btn" type="submit">Register</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Registered webhooks</h2>
+        <table>
+          <thead><tr><th>ID</th><th>Org</th><th>URL</th><th>Events</th><th></th></tr></thead>
+          <tbody id="webhooks-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Audit Log tab -->
+    <div id="tab-audit" class="tab">
+      <div class="card">
+        <h2>Audit Log <small style="font-size:0.8rem;color:#718096">(last 100 requests)</small>
+          <button class="btn btn-sm" onclick="loadAudit()" style="float:right;margin-top:-4px">Refresh</button>
+        </h2>
+        <table>
+          <thead><tr><th>Time</th><th>Key</th><th>Provider</th><th>Model</th><th>Prompt</th><th>Completion</th><th>Cost</th><th>Latency</th><th>Status</th><th>IP</th></tr></thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+let API_KEY = '';
+
+// ---- Bootstrap ----
+(function init() {
+  // SSO flow: key may arrive in URL fragment
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  const fragKey = hash.get('key');
+  if (fragKey) {
+    localStorage.setItem('llmb_key', fragKey);
+    history.replaceState(null, '', window.location.pathname);
+  }
+
+  API_KEY = localStorage.getItem('llmb_key') || '';
+  if (API_KEY) {
+    showApp();
+  } else {
+    document.getElementById('login-screen').style.display = 'flex';
+  }
+})();
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  const short = API_KEY.length > 12 ? API_KEY.slice(0, 8) + '…' + API_KEY.slice(-4) : API_KEY;
+  document.getElementById('key-display').textContent = short;
+  loadTab('keys');
+}
+
+function doLogin() {
+  API_KEY = document.getElementById('login-key-input').value.trim();
+  if (!API_KEY) return;
+  // Validate by hitting /admin/keys
+  apiFetch('/admin/keys').then(() => {
+    localStorage.setItem('llmb_key', API_KEY);
+    showApp();
+  }).catch(e => {
+    document.getElementById('login-err').textContent = 'Invalid key: ' + e.message;
+    document.getElementById('login-err').style.display = 'block';
+  });
+}
+
+function ssoLogin(provider) {
+  window.location.href = '/auth/login?provider=' + provider;
+}
+
+function logout() {
+  localStorage.removeItem('llmb_key');
+  API_KEY = '';
+  window.location.href = '/auth/logout';
+}
+
+function copyKey() {
+  navigator.clipboard.writeText(API_KEY).catch(() => {});
+}
+
+// ---- Tab routing ----
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  loadTab(name);
+}
+
+function loadTab(name) {
+  switch(name) {
+    case 'keys':     loadKeys(); break;
+    case 'orgs':     loadOrgs(); loadTeams(); break;
+    case 'models':   loadModels(); break;
+    case 'router':   loadRouter(); break;
+    case 'metrics':  loadMetrics(); break;
+    case 'aliases':  loadAliases(); break;
+    case 'prompts':  loadPrompts(); break;
+    case 'webhooks': loadWebhooks(); break;
+    case 'audit':    loadAudit(); break;
+  }
+}
+
+// ---- API helper ----
+function apiFetch(path, opts = {}) {
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' }, opts.headers || {});
+  return fetch(path, opts).then(r => {
+    if (!r.ok) return r.json().then(j => Promise.reject(new Error(j?.error?.message || r.statusText)));
+    return r.json();
+  });
+}
+
+// ---- Keys ----
+function loadKeys() {
+  apiFetch('/admin/keys').then(data => {
+    const tb = document.getElementById('keys-body');
+    tb.innerHTML = '';
+    (data.keys || []).forEach(k => {
+      const tr = document.createElement('tr');
+      const scopes = (k.scopes || []).map(s => `<span class="badge badge-blue">${esc(s)}</span>`).join(' ');
+      const spend = k.current_spend != null ? '$' + k.current_spend.toFixed(4) : '-';
+      const limit = k.spend_limit > 0 ? '$' + k.spend_limit.toFixed(2) : '∞';
+      tr.innerHTML = `
+        <td>${esc(k.key)}</td>
+        <td>${esc(k.name || '')}</td>
+        <td>${scopes}</td>
+        <td>${spend}</td>
+        <td>${limit}</td>
+        <td>${esc(k.org_id || '')}</td>
+        <td><button class="btn btn-sm btn-danger" onclick="deleteKey('${esc(k.key)}')">Delete</button></td>
+      `;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function generateKey(e) {
+  e.preventDefault();
+  const scopes = document.getElementById('gen-scopes').value.split(',').map(s => s.trim()).filter(Boolean);
+  const spendLimit = parseFloat(document.getElementById('gen-spend').value) || 0;
+  const ttlH = parseInt(document.getElementById('gen-ttl').value) || 0;
+  const rpm = parseInt(document.getElementById('gen-rpm').value) || 0;
+  const tpm = parseInt(document.getElementById('gen-tpm').value) || 0;
+  const body = { scopes };
+  if (spendLimit > 0) body.spend_limit = spendLimit;
+  if (ttlH > 0) body.ttl_seconds = ttlH * 3600;
+  if (rpm > 0) body.rpm = rpm;
+  if (tpm > 0) body.tpm = tpm;
+  apiFetch('/admin/key/generate', { method: 'POST', body: JSON.stringify(body) }).then(data => {
+    const el = document.getElementById('gen-result');
+    el.style.display = 'block';
+    el.innerHTML = `<div class="alert alert-ok">Generated: <strong style="font-family:monospace">${esc(data.key)}</strong></div>`;
+    loadKeys();
+  }).catch(showGlobalErr);
+}
+
+function deleteKey(key) {
+  if (!confirm('Delete key ' + key + '?')) return;
+  apiFetch('/admin/key/delete', { method: 'DELETE', body: JSON.stringify({ key }) }).then(() => loadKeys()).catch(showGlobalErr);
+}
+
+// ---- Orgs & Teams ----
+function loadOrgs() {
+  apiFetch('/admin/orgs').then(data => {
+    const tb = document.getElementById('orgs-body');
+    tb.innerHTML = '';
+    (data.orgs || []).forEach(o => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(o.id)}</td><td>${esc(o.name)}</td><td>${o.budget > 0 ? '$'+o.budget : '∞'}</td><td>$${(o.current_spend||0).toFixed(4)}</td>`;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function loadTeams() {
+  apiFetch('/admin/teams').then(data => {
+    const tb = document.getElementById('teams-body');
+    tb.innerHTML = '';
+    (data.teams || []).forEach(t => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(t.id)}</td><td>${esc(t.org_id)}</td><td>${esc(t.name)}</td><td>${t.budget > 0 ? '$'+t.budget : '∞'}</td><td>$${(t.current_spend||0).toFixed(4)}</td>`;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function createOrg(e) {
+  e.preventDefault();
+  const name = document.getElementById('org-name').value.trim();
+  const budget = parseFloat(document.getElementById('org-budget').value) || 0;
+  if (!name) return;
+  apiFetch('/admin/orgs', { method: 'POST', body: JSON.stringify({ name, budget }) }).then(() => { loadOrgs(); document.getElementById('org-name').value = ''; }).catch(showGlobalErr);
+}
+
+function createTeam(e) {
+  e.preventDefault();
+  const org_id = document.getElementById('team-org-id').value.trim();
+  const name = document.getElementById('team-name').value.trim();
+  const budget = parseFloat(document.getElementById('team-budget').value) || 0;
+  if (!org_id || !name) return;
+  apiFetch('/admin/teams', { method: 'POST', body: JSON.stringify({ org_id, name, budget }) }).then(() => { loadTeams(); }).catch(showGlobalErr);
+}
+
+// ---- Models ----
+function loadModels() {
+  apiFetch('/admin/models').then(data => {
+    const tb = document.getElementById('models-body');
+    tb.innerHTML = '';
+    (data.models || []).forEach(m => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(m.name)}</td><td>${esc(m.provider)}</td><td>${esc(m.model)}</td>`;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function registerModel(e) {
+  e.preventDefault();
+  const name = document.getElementById('model-name').value.trim();
+  const provider = document.getElementById('model-provider').value.trim();
+  const model = document.getElementById('model-backend').value.trim();
+  if (!name || !provider || !model) return;
+  // Flat body: {name, provider, model}
+  apiFetch('/admin/models', { method: 'POST', body: JSON.stringify({ name, provider, model }) }).then(() => {
+    loadModels();
+    document.getElementById('model-name').value = '';
+    document.getElementById('model-provider').value = '';
+    document.getElementById('model-backend').value = '';
+  }).catch(showGlobalErr);
+}
+
+// ---- Router ----
+function loadRouter() {
+  apiFetch('/admin/router').then(data => {
+    const tb = document.getElementById('router-body');
+    tb.innerHTML = '';
+    (data.deployments || []).forEach(c => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(c.name)}</td><td><span class="badge badge-blue">${esc(c.strategy)}</span></td><td>${(c.providers||[]).join(', ')}</td>`;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function deployRouter(e) {
+  e.preventDefault();
+  const name = document.getElementById('router-model').value.trim();
+  const strategy = document.getElementById('router-strategy').value;
+  const providers = document.getElementById('router-providers').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!name || !providers.length) return;
+  apiFetch('/admin/router', { method: 'POST', body: JSON.stringify({ name, strategy, providers }) }).then(() => loadRouter()).catch(showGlobalErr);
+}
+
+// ---- Metrics ----
+function loadMetrics() {
+  apiFetch('/admin/stats').then(data => {
+    document.getElementById('m-requests').textContent = data.total_requests ?? '—';
+    document.getElementById('m-tokens').textContent = fmtNum(data.total_tokens);
+    document.getElementById('m-keys').textContent = data.active_keys ?? '—';
+    document.getElementById('m-orgs').textContent = data.orgs_count ?? '—';
+  }).catch(() => {});
+
+  fetch('/metrics', { headers: { 'Authorization': 'Bearer ' + API_KEY } })
+    .then(r => r.text())
+    .then(t => { document.getElementById('raw-metrics').textContent = t; })
+    .catch(() => {});
+}
+
+// ---- Aliases ----
+function loadAliases() {
+  apiFetch('/admin/aliases').then(data => {
+    const tb = document.getElementById('aliases-body');
+    tb.innerHTML = '';
+    const aliases = data.aliases || {};
+    Object.entries(aliases).forEach(([alias, model]) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(alias)}</td><td>${esc(model)}</td>`;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function setAlias(e) {
+  e.preventDefault();
+  const alias = document.getElementById('alias-name').value.trim();
+  const model = document.getElementById('alias-model').value.trim();
+  if (!alias || !model) return;
+  apiFetch('/admin/aliases', { method: 'POST', body: JSON.stringify({ alias, model }) }).then(() => {
+    loadAliases();
+    document.getElementById('alias-name').value = '';
+    document.getElementById('alias-model').value = '';
+  }).catch(showGlobalErr);
+}
+
+// ---- Prompts ----
+function loadPrompts() {
+  apiFetch('/admin/prompts').then(data => {
+    const tb = document.getElementById('prompts-body');
+    tb.innerHTML = '';
+    (data.prompts || []).forEach(p => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-family:monospace;font-size:0.75rem">${esc(p.id)}</td>
+        <td>${esc(p.name)}</td>
+        <td>${p.version}</td>
+        <td>${(p.variables||[]).map(v=>`<span class="badge badge-blue">${esc(v)}</span>`).join(' ')}</td>
+        <td><button class="btn btn-sm btn-danger" onclick="deletePrompt('${esc(p.id)}')">Delete</button></td>
+      `;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function createPrompt(e) {
+  e.preventDefault();
+  const name = document.getElementById('prompt-name').value.trim();
+  const template = document.getElementById('prompt-template').value;
+  const variables = document.getElementById('prompt-vars').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if (!name || !template) return;
+  apiFetch('/admin/prompts', { method: 'POST', body: JSON.stringify({ name, template, variables }) }).then(() => {
+    loadPrompts();
+    document.getElementById('prompt-name').value = '';
+    document.getElementById('prompt-template').value = '';
+    document.getElementById('prompt-vars').value = '';
+  }).catch(showGlobalErr);
+}
+
+function deletePrompt(id) {
+  if (!confirm('Delete prompt ' + id + '?')) return;
+  apiFetch('/admin/prompts/' + id, { method: 'DELETE' }).then(() => loadPrompts()).catch(showGlobalErr);
+}
+
+function renderPrompt(e) {
+  e.preventDefault();
+  const id = document.getElementById('render-id').value.trim();
+  let vars = {};
+  try { vars = JSON.parse(document.getElementById('render-vars').value || '{}'); } catch(_) {}
+  if (!id) return;
+  apiFetch('/admin/prompts/' + id + '/render', { method: 'POST', body: JSON.stringify(vars) }).then(data => {
+    const el = document.getElementById('render-result');
+    el.style.display = 'block';
+    el.textContent = data.rendered;
+  }).catch(err => {
+    const el = document.getElementById('render-result');
+    el.style.display = 'block';
+    el.textContent = 'Error: ' + err.message;
+  });
+}
+
+// ---- Webhooks ----
+function loadWebhooks() {
+  apiFetch('/admin/webhooks').then(data => {
+    const tb = document.getElementById('webhooks-body');
+    tb.innerHTML = '';
+    (data.webhooks || []).forEach(w => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-family:monospace;font-size:0.75rem">${esc(w.id)}</td>
+        <td>${esc(w.org_id || '(all)')}</td>
+        <td style="word-break:break-all">${esc(w.url)}</td>
+        <td>${(w.events||[]).map(ev=>`<span class="badge badge-blue">${esc(ev)}</span>`).join(' ')}</td>
+        <td><button class="btn btn-sm btn-danger" onclick="deleteWebhook('${esc(w.id)}')">Delete</button></td>
+      `;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+function registerWebhook(e) {
+  e.preventDefault();
+  const url = document.getElementById('wh-url').value.trim();
+  const org_id = document.getElementById('wh-org').value.trim();
+  const evtVal = document.getElementById('wh-events').value;
+  const secret = document.getElementById('wh-secret').value;
+  if (!url) return;
+  const events = evtVal === 'all' ? [] : [evtVal];
+  const body = { url, events };
+  if (org_id) body.org_id = org_id;
+  if (secret) body.secret = secret;
+  apiFetch('/admin/webhooks', { method: 'POST', body: JSON.stringify(body) }).then(() => {
+    loadWebhooks();
+    document.getElementById('wh-url').value = '';
+    document.getElementById('wh-org').value = '';
+    document.getElementById('wh-secret').value = '';
+  }).catch(showGlobalErr);
+}
+
+function deleteWebhook(id) {
+  if (!confirm('Delete webhook ' + id + '?')) return;
+  apiFetch('/admin/webhooks/' + id, { method: 'DELETE' }).then(() => loadWebhooks()).catch(showGlobalErr);
+}
+
+// ---- Audit Log ----
+function loadAudit() {
+  apiFetch('/admin/audit-log?limit=100').then(data => {
+    const tb = document.getElementById('audit-body');
+    tb.innerHTML = '';
+    const entries = data.entries || [];
+    if (!entries.length) {
+      tb.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#718096">No entries yet</td></tr>';
+      return;
+    }
+    entries.forEach(e => {
+      const tr = document.createElement('tr');
+      const ts = new Date(e.timestamp).toLocaleTimeString();
+      const cost = e.cost > 0 ? '$' + e.cost.toFixed(6) : '—';
+      tr.innerHTML = `
+        <td>${esc(ts)}</td>
+        <td style="font-family:monospace;font-size:0.8rem">${esc(e.api_key)}</td>
+        <td>${esc(e.provider)}</td>
+        <td>${esc(e.model)}</td>
+        <td>${e.prompt_tokens}</td>
+        <td>${e.completion_tokens}</td>
+        <td>${cost}</td>
+        <td>${e.latency_ms}ms</td>
+        <td>${e.status}</td>
+        <td style="font-size:0.8rem">${esc(e.user_ip)}</td>
+      `;
+      tb.appendChild(tr);
+    });
+  }).catch(showGlobalErr);
+}
+
+// ---- Utilities ----
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtNum(n) {
+  if (n == null) return '—';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+function showGlobalErr(err) {
+  console.error(err);
+}
+</script>
+</body>
+</html>

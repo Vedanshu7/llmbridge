@@ -12,6 +12,7 @@ package callbacks
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -170,6 +171,103 @@ func WebhookHandler(url string, client *http.Client) Handler {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+}
+
+// LangfuseHandler returns a Handler that sends trace + generation events to a
+// Langfuse instance (cloud or self-hosted) using Basic auth (publicKey:secretKey).
+// baseURL should be "https://cloud.langfuse.com" for the managed service.
+// Delivery is best-effort — failures are silently dropped.
+// An optional http.Client may be supplied; pass nil to use a 5-second default.
+func LangfuseHandler(publicKey, secretKey, baseURL string, client *http.Client) Handler {
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	creds := base64.StdEncoding.EncodeToString([]byte(publicKey + ":" + secretKey))
+	return func(_ context.Context, event Event) {
+		if event.Type != EventResponse && event.Type != EventError {
+			return
+		}
+		traceID := fmt.Sprintf("llmbridge-%d", time.Now().UnixNano())
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+
+		var inputText, outputText string
+		if event.Request != nil && len(event.Request.Messages) > 0 {
+			last := event.Request.Messages[len(event.Request.Messages)-1]
+			inputText = last.Content
+		}
+		if event.Response != nil {
+			outputText = event.Response.Content
+		}
+		var errMsg *string
+		if event.Error != nil {
+			s := event.Error.Error()
+			errMsg = &s
+		}
+
+		type observationBody struct {
+			ID          string      `json:"id"`
+			TraceID     string      `json:"traceId"`
+			Type        string      `json:"type"`
+			Name        string      `json:"name"`
+			StartTime   string      `json:"startTime"`
+			EndTime     string      `json:"endTime"`
+			Model       string      `json:"model"`
+			Input       string      `json:"input"`
+			Output      string      `json:"output"`
+			Level       string      `json:"level"`
+			StatusMsg   *string     `json:"statusMessage,omitempty"`
+			Usage       interface{} `json:"usage,omitempty"`
+		}
+		level := "DEFAULT"
+		if event.Type == EventError {
+			level = "ERROR"
+		}
+		var usage interface{}
+		if event.Response != nil && event.Response.Usage != nil {
+			usage = map[string]int{
+				"input":  event.Response.Usage.PromptTokens,
+				"output": event.Response.Usage.CompletionTokens,
+				"total":  event.Response.Usage.TotalTokens,
+			}
+		}
+		endTime := time.Now().UTC().Format(time.RFC3339Nano)
+		obs := observationBody{
+			ID:        traceID + "-gen",
+			TraceID:   traceID,
+			Type:      "GENERATION",
+			Name:      event.Provider + "/" + event.Model,
+			StartTime: now,
+			EndTime:   endTime,
+			Model:     event.Model,
+			Input:     inputText,
+			Output:    outputText,
+			Level:     level,
+			StatusMsg: errMsg,
+			Usage:     usage,
+		}
+		payload := map[string]interface{}{
+			"batch": []map[string]interface{}{
+				{"id": traceID, "type": "trace-create", "body": map[string]string{
+					"id": traceID, "name": "llmbridge",
+				}},
+				{"id": traceID + "-gen", "type": "observation-create", "body": obs},
+			},
+		}
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/api/public/ingestion", bytes.NewReader(b))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Basic "+creds)
 		resp, err := client.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()

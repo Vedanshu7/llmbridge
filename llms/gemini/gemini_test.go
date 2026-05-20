@@ -151,3 +151,156 @@ func TestCompleteURLContainsModel(t *testing.T) {
 		t.Fatalf("request path should contain model name, got %q", requestPath)
 	}
 }
+
+// ---- Name / ValidateEnvironment ----
+
+func TestName(t *testing.T) {
+	p := New("", "key")
+	if p.Name() != "gemini" {
+		t.Errorf("Name() = %q, want gemini", p.Name())
+	}
+}
+
+func TestDefaultModel(t *testing.T) {
+	p := New("", "key")
+	if p.model != defaultModel {
+		t.Errorf("model = %q, want %q", p.model, defaultModel)
+	}
+}
+
+func TestValidateEnvironmentMissingKey(t *testing.T) {
+	p := New("", "")
+	if err := p.ValidateEnvironment(); err == nil {
+		t.Fatal("expected error when API key is empty")
+	}
+}
+
+func TestValidateEnvironmentWithKey(t *testing.T) {
+	p := New("", "my-key")
+	if err := p.ValidateEnvironment(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---- Stream ----
+
+func TestStreamSuccess(t *testing.T) {
+	// Gemini SSE format: each event is "data: <json>\n\n"
+	chunk := `{"candidates":[{"content":{"parts":[{"text":"hello "}]},"finishReason":""}]}`
+	chunk2 := `{"candidates":[{"content":{"parts":[{"text":"world"}]},"finishReason":"STOP"}]}`
+	sseBody := "data: " + chunk + "\n\n" + "data: " + chunk2 + "\n\n"
+
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sseBody))
+	})
+
+	ch, err := p.Stream(context.Background(), types.Request{
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var got strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatalf("stream error: %v", d.Err)
+		}
+		got.WriteString(d.Content)
+		if d.Done {
+			break
+		}
+	}
+	if got.String() != "hello world" {
+		t.Errorf("streamed content = %q, want %q", got.String(), "hello world")
+	}
+}
+
+func TestStreamHTTPError(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	_, err := p.Stream(context.Background(), types.Request{
+		Messages: []types.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error from Stream on 403")
+	}
+}
+
+// ---- Embed ----
+
+func TestEmbedSuccess(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"embeddings": []map[string]interface{}{
+				{"values": []float64{0.1, 0.2, 0.3}},
+				{"values": []float64{0.4, 0.5, 0.6}},
+			},
+		})
+	})
+
+	result, err := p.Embed(context.Background(), []string{"hello", "world"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 embeddings, got %d", len(result))
+	}
+	if result[0][0] != 0.1 {
+		t.Errorf("unexpected embedding[0][0]: %v", result[0][0])
+	}
+}
+
+func TestEmbedHTTPError(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+	_, err := p.Embed(context.Background(), []string{"hello"})
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+}
+
+// ---- CostForResponse ----
+
+func TestCostForResponseKnown(t *testing.T) {
+	resp := &types.Response{
+		Model:    "gemini-2.0-flash",
+		Provider: "gemini",
+		Usage:    &types.UsageData{PromptTokens: 1000, CompletionTokens: 500},
+	}
+	cost, err := CostForResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cost <= 0 {
+		t.Errorf("expected positive cost, got %f", cost)
+	}
+}
+
+func TestCostForResponseNilUsage(t *testing.T) {
+	resp := &types.Response{Model: "gemini-2.0-flash", Provider: "gemini"}
+	cost, err := CostForResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cost != 0 {
+		t.Errorf("expected 0 cost for nil usage, got %f", cost)
+	}
+}
+
+func TestCostForResponseUnknownModel(t *testing.T) {
+	resp := &types.Response{
+		Model:    "gemini-unknown-xyz",
+		Provider: "gemini",
+		Usage:    &types.UsageData{PromptTokens: 100, CompletionTokens: 50},
+	}
+	_, err := CostForResponse(resp)
+	if err == nil {
+		t.Fatal("expected error for unknown model")
+	}
+}

@@ -12,6 +12,7 @@ import (
 // KeyManagement handles API key CRUD via HTTP.
 type KeyManagement struct {
 	store *auth.APIKeyStore
+	rl    *auth.RateLimiter // may be nil
 }
 
 // NewKeyManagement returns a KeyManagement backed by the given store.
@@ -19,9 +20,15 @@ func NewKeyManagement(store *auth.APIKeyStore) *KeyManagement {
 	return &KeyManagement{store: store}
 }
 
+// NewKeyManagementWithRateLimiter returns a KeyManagement that can also configure
+// per-key rate limits during key generation.
+func NewKeyManagementWithRateLimiter(store *auth.APIKeyStore, rl *auth.RateLimiter) *KeyManagement {
+	return &KeyManagement{store: store, rl: rl}
+}
+
 // HandleGenerate handles POST /admin/key/generate.
 // Optional JSON fields: "scopes" ([]string), "ttl_seconds" (int), "spend_limit" (float64),
-// "org_id" (string), "team_id" (string).
+// "org_id" (string), "team_id" (string), "rpm" (int), "tpm" (int).
 func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Scopes     []string `json:"scopes"`
@@ -29,6 +36,8 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 		SpendLimit float64  `json:"spend_limit"`
 		OrgID      string   `json:"org_id"`
 		TeamID     string   `json:"team_id"`
+		RPM        int      `json:"rpm"` // requests per minute; 0 = unlimited
+		TPM        int      `json:"tpm"` // tokens per minute; 0 = unlimited
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Scopes) == 0 {
 		body.Scopes = []string{"completion"}
@@ -50,6 +59,12 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 	if body.TeamID != "" {
 		km.store.SetKeyTeam(key, body.TeamID)
 	}
+	if km.rl != nil && (body.RPM > 0 || body.TPM > 0) {
+		km.rl.SetLimit(key, auth.RateLimit{
+			RequestsPerMin: body.RPM,
+			TokensPerMin:   body.TPM,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }
 
@@ -70,6 +85,30 @@ func (km *KeyManagement) HandleDelete(w http.ResponseWriter, r *http.Request) {
 func (km *KeyManagement) HandleList(w http.ResponseWriter, r *http.Request) {
 	keys := km.store.ListKeys()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"keys": keys})
+}
+
+// HandleSetRateLimit handles PUT /admin/key/rate-limit.
+// Body: {"key": "...", "rpm": 60, "tpm": 100000}. 0 removes the limit.
+func (km *KeyManagement) HandleSetRateLimit(w http.ResponseWriter, r *http.Request) {
+	if km.rl == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "rate limiter not configured"})
+		return
+	}
+	var body struct {
+		Key string `json:"key"`
+		RPM int    `json:"rpm"`
+		TPM int    `json:"tpm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key field required"})
+		return
+	}
+	if body.RPM == 0 && body.TPM == 0 {
+		km.rl.RemoveLimit(body.Key)
+	} else {
+		km.rl.SetLimit(body.Key, auth.RateLimit{RequestsPerMin: body.RPM, TokensPerMin: body.TPM})
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

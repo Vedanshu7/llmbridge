@@ -50,7 +50,7 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  llmbridge server   [--config config.json] [--addr :8080] [--provider openai] [--model gpt-4o] [--key KEY]
+  llmbridge server   [--config config.json] [--db llmbridge.db] [--addr :8080] [--provider openai] [--model gpt-4o] [--key KEY]
   llmbridge key generate [--scope SCOPE] [--spend-limit DOLLARS]
   llmbridge key list
   llmbridge key delete KEY
@@ -62,6 +62,7 @@ func printUsage() {
 func cmdServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	cfgFile := fs.String("config", "", "path to JSON config file")
+	dbPath := fs.String("db", "", "path to SQLite database for persistent state (e.g. /data/llmbridge.db)")
 	addr := fs.String("addr", ":8080", "listen address")
 	provider := fs.String("provider", "openai", "provider: openai, anthropic, gemini, groq, ollama, deepseek, ...")
 	model := fs.String("model", "", "model name (provider default if empty)")
@@ -90,7 +91,26 @@ func cmdServer(args []string) {
 
 	var srv *proxy.Server
 	if *cfgFile != "" {
-		srv = proxy.FromConfig(cfg, p)
+		if *dbPath != "" {
+			var err error
+			srv, err = proxy.FromConfigWithDB(cfg, p, *dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+		} else {
+			srv = proxy.FromConfig(cfg, p)
+		}
+	} else if *dbPath != "" {
+		var err error
+		srv, err = proxy.NewServerWithDB(p, *dbPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		if cfg.JWTSecret != "" {
+			srv.SetJWTSecret([]byte(cfg.JWTSecret))
+		}
 	} else {
 		srv = proxy.NewServer(p)
 		if cfg.JWTSecret != "" {

@@ -100,6 +100,61 @@ func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.
 	return ch, nil
 }
 
+// Embed implements base.EmbedProvider using the Bedrock Titan Text Embeddings V2 model.
+// Each text is embedded individually (Titan's InvokeModel API is single-input).
+func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+	out := make([][]float64, len(texts))
+	for i, text := range texts {
+		vec, err := p.embedOne(text)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = vec
+	}
+	return out, nil
+}
+
+func (p *Provider) titanEmbedURL() string {
+	return fmt.Sprintf(
+		"https://bedrock-runtime.%s.amazonaws.com/model/amazon.titan-embed-text-v2%%3A0/invoke",
+		p.region,
+	)
+}
+
+func (p *Provider) embedOne(text string) ([]float64, error) {
+	wireReq := map[string]string{"inputText": text}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
+	}
+	req, err := http.NewRequest(http.MethodPost, p.titanEmbedURL(), bytes.NewReader(body))
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	signRequest(req, p.accessKeyID, p.secretKey, p.region, "bedrock", body, time.Now().UTC())
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "read body: "+err.Error(), err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, exceptions.ClassifyHTTPError(p.Name(), resp.StatusCode, raw)
+	}
+	var wire struct {
+		Embedding []float64 `json:"embedding"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "parse embedding: "+err.Error(), err)
+	}
+	return wire.Embedding, nil
+}
+
 func (p *Provider) converseURL() string {
 	return fmt.Sprintf(
 		"https://bedrock-runtime.%s.amazonaws.com/model/%s/converse",

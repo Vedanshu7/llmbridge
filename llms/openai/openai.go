@@ -3,12 +3,15 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Vedanshu7/llmbridge/exceptions"
@@ -318,6 +321,194 @@ func (p *Provider) Moderate(ctx context.Context, req types.ModerationRequest) (*
 		Results:  results,
 		Provider: p.name,
 	}, nil
+}
+
+// BatchCreate uploads a JSONL file and submits an OpenAI native batch job.
+// Returns the batch ID that can be polled via BatchStatus.
+func (p *Provider) BatchCreate(ctx context.Context, reqs []types.Request) (string, error) {
+	// Build JSONL payload: one line per request.
+	var buf strings.Builder
+	for i, req := range reqs {
+		wireReq := map[string]interface{}{
+			"custom_id": fmt.Sprintf("req-%d", i),
+			"method":    "POST",
+			"url":       "/v1/chat/completions",
+			"body":      chat.ToOAIRequest(req, p.model, false),
+		}
+		line, err := json.Marshal(wireReq)
+		if err != nil {
+			return "", exceptions.NewProviderError(p.name, 0, "marshal batch line: "+err.Error(), err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	jsonlBytes := []byte(buf.String())
+
+	// Upload the file.
+	fileID, err := p.uploadBatchFile(jsonlBytes)
+	if err != nil {
+		return "", err
+	}
+
+	// Create the batch.
+	createReq := map[string]interface{}{
+		"input_file_id":    fileID,
+		"endpoint":         "/v1/chat/completions",
+		"completion_window": "24h",
+	}
+	body, err := json.Marshal(createReq)
+	if err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postURL("https://api.openai.com/v1/batches", body)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "parse batch create: "+err.Error(), err)
+	}
+	return resp.ID, nil
+}
+
+// BatchStatus returns the current status and request counts for a batch.
+func (p *Provider) BatchStatus(ctx context.Context, batchID string) (string, map[string]int, error) {
+	raw, err := p.getURL("https://api.openai.com/v1/batches/" + batchID)
+	if err != nil {
+		return "", nil, err
+	}
+	var resp struct {
+		Status        string `json:"status"`
+		RequestCounts struct {
+			Total     int `json:"total"`
+			Completed int `json:"completed"`
+			Failed    int `json:"failed"`
+		} `json:"request_counts"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", nil, exceptions.NewProviderError(p.name, 0, "parse batch status: "+err.Error(), err)
+	}
+	counts := map[string]int{
+		"total":     resp.RequestCounts.Total,
+		"completed": resp.RequestCounts.Completed,
+		"failed":    resp.RequestCounts.Failed,
+	}
+	return resp.Status, counts, nil
+}
+
+// BatchResults fetches and parses the output file for a completed batch.
+func (p *Provider) BatchResults(ctx context.Context, batchID string) ([]types.BatchResult, error) {
+	// First fetch the batch to get output_file_id.
+	raw, err := p.getURL("https://api.openai.com/v1/batches/" + batchID)
+	if err != nil {
+		return nil, err
+	}
+	var batchResp struct {
+		Status       string `json:"status"`
+		OutputFileID string `json:"output_file_id"`
+	}
+	if err := json.Unmarshal(raw, &batchResp); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "parse batch: "+err.Error(), err)
+	}
+	if batchResp.Status != "completed" {
+		return nil, exceptions.NewProviderError(p.name, 0, "batch not completed: "+batchResp.Status, nil)
+	}
+	content, err := p.getURL("https://api.openai.com/v1/files/" + batchResp.OutputFileID + "/content")
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSONL output.
+	var results []types.BatchResult
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		var out struct {
+			CustomID string          `json:"custom_id"`
+			Response *chat.OAIResponse `json:"response"`
+			Error    *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &out); err != nil {
+			results = append(results, types.BatchResult{Err: err, Index: i})
+			continue
+		}
+		if out.Error != nil {
+			results = append(results, types.BatchResult{
+				Err:   exceptions.NewProviderError(p.name, 0, out.Error.Message, nil),
+				Index: i,
+			})
+			continue
+		}
+		if out.Response != nil && len(out.Response.Choices) > 0 {
+			resp := chat.FromOAIResponse(out.Response, p.name, p.model)
+			results = append(results, types.BatchResult{Response: resp, Index: i})
+		}
+	}
+	return results, nil
+}
+
+func (p *Provider) uploadBatchFile(jsonl []byte) (string, error) {
+	// Build multipart/form-data with fields: purpose=batch, file=<jsonl>
+	var bufBody bytes.Buffer
+	w := multipart.NewWriter(&bufBody)
+	_ = w.WriteField("purpose", "batch")
+	fw, err := w.CreateFormFile("file", "batch.jsonl")
+	if err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "create form file: "+err.Error(), err)
+	}
+	if _, err := fw.Write(jsonl); err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "write jsonl: "+err.Error(), err)
+	}
+	w.Close()
+	raw, err := p.postURLContentType("https://api.openai.com/v1/files", bufBody.Bytes(), w.FormDataContentType())
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "parse file upload: "+err.Error(), err)
+	}
+	return resp.ID, nil
+}
+
+// Embed implements base.EmbedProvider using the OpenAI /v1/embeddings endpoint.
+// The default model is text-embedding-3-small.
+func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+	model := "text-embedding-3-small"
+	embedURL := strings.Replace(p.baseURL, "chat/completions", "embeddings", 1)
+	wireReq := map[string]interface{}{
+		"model": model,
+		"input": texts,
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postURL(embedURL, body)
+	if err != nil {
+		return nil, err
+	}
+	var wire struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "parse embeddings: "+err.Error(), err)
+	}
+	out := make([][]float64, len(wire.Data))
+	for i, d := range wire.Data {
+		out[i] = d.Embedding
+	}
+	return out, nil
 }
 
 // Stream implements base.Streamer for token-by-token output via SSE.

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -27,19 +28,90 @@ type Team struct {
 	CurrentSpend float64   `json:"current_spend"` // accumulated USD spend
 }
 
-// OrgStore is a thread-safe in-memory store for orgs and teams.
+// OrgStore is a thread-safe store for orgs and teams backed by an optional SQLite database.
 type OrgStore struct {
 	mu    sync.RWMutex
 	orgs  map[string]*Org
 	teams map[string]*Team
+	db    *sql.DB // nil = in-memory only
 }
 
-// NewOrgStore returns an empty OrgStore.
+// NewOrgStore returns an in-memory-only OrgStore.
 func NewOrgStore() *OrgStore {
 	return &OrgStore{
 		orgs:  make(map[string]*Org),
 		teams: make(map[string]*Team),
 	}
+}
+
+// NewOrgStoreWithDB returns an OrgStore backed by db.
+// All existing rows in the orgs and teams tables are loaded into memory.
+func NewOrgStoreWithDB(db *sql.DB) (*OrgStore, error) {
+	s := &OrgStore{
+		orgs:  make(map[string]*Org),
+		teams: make(map[string]*Team),
+		db:    db,
+	}
+	if err := s.loadFromDB(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *OrgStore) loadFromDB() error {
+	rows, err := s.db.Query(`SELECT id, name, created_at, budget, current_spend FROM orgs`)
+	if err != nil {
+		return fmt.Errorf("auth: load orgs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var org Org
+		var createdAt int64
+		if err := rows.Scan(&org.ID, &org.Name, &createdAt, &org.Budget, &org.CurrentSpend); err != nil {
+			return fmt.Errorf("auth: scan org: %w", err)
+		}
+		org.CreatedAt = time.Unix(createdAt, 0)
+		s.orgs[org.ID] = &org
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	trows, err := s.db.Query(`SELECT id, org_id, name, created_at, budget, current_spend FROM teams`)
+	if err != nil {
+		return fmt.Errorf("auth: load teams: %w", err)
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var team Team
+		var createdAt int64
+		if err := trows.Scan(&team.ID, &team.OrgID, &team.Name, &createdAt, &team.Budget, &team.CurrentSpend); err != nil {
+			return fmt.Errorf("auth: scan team: %w", err)
+		}
+		team.CreatedAt = time.Unix(createdAt, 0)
+		s.teams[team.ID] = &team
+	}
+	return trows.Err()
+}
+
+func (s *OrgStore) persistOrg(org *Org) {
+	if s.db == nil {
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT OR REPLACE INTO orgs (id, name, created_at, budget, current_spend) VALUES (?,?,?,?,?)`,
+		org.ID, org.Name, org.CreatedAt.Unix(), org.Budget, org.CurrentSpend,
+	)
+}
+
+func (s *OrgStore) persistTeam(team *Team) {
+	if s.db == nil {
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT OR REPLACE INTO teams (id, org_id, name, created_at, budget, current_spend) VALUES (?,?,?,?,?,?)`,
+		team.ID, team.OrgID, team.Name, team.CreatedAt.Unix(), team.Budget, team.CurrentSpend,
+	)
 }
 
 // CreateOrg creates a new Org with the given name and optional budget (0 = unlimited).
@@ -56,6 +128,7 @@ func (s *OrgStore) CreateOrg(name string, budget float64) (*Org, error) {
 	}
 	s.mu.Lock()
 	s.orgs[id] = org
+	s.persistOrg(org)
 	s.mu.Unlock()
 	return org, nil
 }
@@ -99,6 +172,7 @@ func (s *OrgStore) CreateTeam(orgID, name string, budget float64) (*Team, error)
 		Budget:    budget,
 	}
 	s.teams[id] = team
+	s.persistTeam(team)
 	return team, nil
 }
 
@@ -133,6 +207,7 @@ func (s *OrgStore) RecordTeamSpend(teamID string, cost float64) error {
 		return nil
 	}
 	team.CurrentSpend += cost
+	s.persistTeam(team)
 	if team.Budget > 0 && team.CurrentSpend > team.Budget {
 		return fmt.Errorf("team %s exceeded budget: $%.6f of $%.6f",
 			teamID, team.CurrentSpend, team.Budget)
@@ -142,6 +217,7 @@ func (s *OrgStore) RecordTeamSpend(teamID string, cost float64) error {
 		return nil
 	}
 	org.CurrentSpend += cost
+	s.persistOrg(org)
 	if org.Budget > 0 && org.CurrentSpend > org.Budget {
 		return fmt.Errorf("org %s exceeded budget: $%.6f of $%.6f",
 			team.OrgID, org.CurrentSpend, org.Budget)
@@ -159,6 +235,7 @@ func (s *OrgStore) RecordOrgSpend(orgID string, cost float64) error {
 		return nil
 	}
 	org.CurrentSpend += cost
+	s.persistOrg(org)
 	if org.Budget > 0 && org.CurrentSpend > org.Budget {
 		return fmt.Errorf("org %s exceeded budget: $%.6f of $%.6f",
 			orgID, org.CurrentSpend, org.Budget)

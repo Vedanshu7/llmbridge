@@ -26,15 +26,19 @@ package proxy
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	llmbridge "github.com/Vedanshu7/llmbridge"
+	"github.com/Vedanshu7/llmbridge/callbacks"
 	"github.com/Vedanshu7/llmbridge/caching"
 	"github.com/Vedanshu7/llmbridge/guardrails"
 	"github.com/Vedanshu7/llmbridge/llms/base"
@@ -43,8 +47,21 @@ import (
 	"github.com/Vedanshu7/llmbridge/proxy/management"
 	"github.com/Vedanshu7/llmbridge/proxy/metrics"
 	"github.com/Vedanshu7/llmbridge/proxy/middleware"
+	"github.com/Vedanshu7/llmbridge/proxy/persistence"
+	"github.com/Vedanshu7/llmbridge/proxy/audit"
+	"github.com/Vedanshu7/llmbridge/proxy/prompts"
+	"github.com/Vedanshu7/llmbridge/proxy/secrets"
+	"github.com/Vedanshu7/llmbridge/proxy/ui"
+	"github.com/Vedanshu7/llmbridge/proxy/webhooks"
 	"github.com/Vedanshu7/llmbridge/types"
 )
+
+// batchRecord tracks an in-process batch job for non-native-batch providers.
+type batchRecord struct {
+	status  string
+	results []llmbridge.BatchResult
+	total   int
+}
 
 // Server is the OpenAI-compatible proxy HTTP server.
 type Server struct {
@@ -62,22 +79,77 @@ type Server struct {
 	cacheTTL    time.Duration      // default TTL for cache entries
 	guardrails  *guardrails.Engine // nil = guardrails disabled
 	mux         *http.ServeMux
+
+	batchMu      sync.RWMutex
+	batchRecords map[string]*batchRecord // batchID → record (in-process fallback)
+
+	promptStore  *prompts.Store
+	webhookStore *webhooks.Store
+	auditLog     *audit.Log
+
+	// OIDC/SSO
+	oidcProviders map[string]*auth.OIDCProvider // name → provider
+	oidcStates    *auth.OIDCStateStore
 }
 
 // NewServer constructs a Server backed by the given LLM provider.
 // Pass a *llmbridge.Router as the provider to get multi-backend routing.
 func NewServer(provider base.LLM) *Server {
 	s := &Server{
-		provider:    provider,
-		keyStore:    auth.NewAPIKeyStore(),
-		orgStore:    auth.NewOrgStore(),
-		rateLimiter: auth.NewRateLimiter(),
-		collector:   metrics.NewCollector(),
-		modelReg:    management.NewModelRegistry(),
-		routerCfg:   management.NewRouterConfig(),
+		provider:      provider,
+		keyStore:      auth.NewAPIKeyStore(),
+		orgStore:      auth.NewOrgStore(),
+		rateLimiter:   auth.NewRateLimiter(),
+		collector:     metrics.NewCollector(),
+		modelReg:      management.NewModelRegistry(),
+		routerCfg:     management.NewRouterConfig(),
+		batchRecords:  make(map[string]*batchRecord),
+		promptStore:   prompts.NewStore(),
+		webhookStore:  webhooks.NewStore(),
+		auditLog:      audit.New(1000),
+		oidcProviders: make(map[string]*auth.OIDCProvider),
+		oidcStates:    auth.NewOIDCStateStore(),
 	}
 	s.mux = s.buildMux()
 	return s
+}
+
+// NewServerWithDB constructs a Server backed by provider and a SQLite database at dbPath.
+// State (API keys, orgs, teams, spend) is persisted across restarts.
+func NewServerWithDB(provider base.LLM, dbPath string) (*Server, error) {
+	db, err := persistence.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	keyStore, err := auth.NewAPIKeyStoreWithDB(db)
+	if err != nil {
+		return nil, err
+	}
+	orgStore, err := auth.NewOrgStoreWithDB(db)
+	if err != nil {
+		return nil, err
+	}
+	ps := prompts.NewStore()
+	if err := ps.AttachDB(db); err != nil {
+		return nil, err
+	}
+	s := &Server{
+		provider:      provider,
+		keyStore:      keyStore,
+		orgStore:      orgStore,
+		rateLimiter:   auth.NewRateLimiter(),
+		collector:     metrics.NewCollector(),
+		modelReg:      management.NewModelRegistry(),
+		routerCfg:     management.NewRouterConfig(),
+		batchRecords:  make(map[string]*batchRecord),
+		promptStore:   ps,
+		webhookStore:  webhooks.NewStore(),
+		auditLog:      audit.New(1000),
+		oidcProviders: make(map[string]*auth.OIDCProvider),
+		oidcStates:    auth.NewOIDCStateStore(),
+	}
+	s.mux = s.buildMux()
+	return s, nil
 }
 
 // RateLimiter returns the server's rate limiter, allowing callers to set
@@ -116,8 +188,44 @@ func (s *Server) SetJWTSecret(secret []byte) {
 }
 
 // FromConfig constructs a Server pre-configured from a config.Config.
+// It resolves any configured secrets before applying other settings.
 func FromConfig(cfg *config.Config, provider base.LLM) *Server {
-	s := NewServer(provider)
+	s, _ := fromConfig(cfg, provider, "")
+	return s
+}
+
+// FromConfigWithDB is like FromConfig but opens a SQLite database at dbPath
+// so that API keys, orgs, and spend are persisted across restarts.
+func FromConfigWithDB(cfg *config.Config, provider base.LLM, dbPath string) (*Server, error) {
+	return fromConfig(cfg, provider, dbPath)
+}
+
+func fromConfig(cfg *config.Config, provider base.LLM, dbPath string) (*Server, error) {
+	// Resolve external secrets before anything else, so that env vars are set
+	// when provider constructors or config values are evaluated.
+	if sc := cfg.Secrets; sc != nil && len(sc.Mappings) > 0 {
+		loader, err := secrets.NewLoader(sc.Backend, sc.Options)
+		if err == nil {
+			for envVar, secretPath := range sc.Mappings {
+				if val, err := loader.Load(context.Background(), secretPath); err == nil {
+					_ = os.Setenv(envVar, val)
+				}
+			}
+		}
+	}
+
+	var (
+		s   *Server
+		err error
+	)
+	if dbPath != "" {
+		s, err = NewServerWithDB(provider, dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: open db %s: %w", dbPath, err)
+		}
+	} else {
+		s = NewServer(provider)
+	}
 	if cfg.JWTSecret != "" {
 		s.jwtSecret = []byte(cfg.JWTSecret)
 		s.mux = s.buildMux()
@@ -132,6 +240,18 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 		s.aliases = cfg.Aliases
 	}
 	s.logFile = cfg.LogFile
+
+	// Wire OIDC/SSO from config.
+	if cfg.OIDC != nil {
+		switch cfg.OIDC.Provider {
+		case "google":
+			s.oidcProviders["google"] = auth.NewGoogleProvider(cfg.OIDC.ClientID, cfg.OIDC.ClientSecret, cfg.OIDC.RedirectURL)
+		case "github":
+			s.oidcProviders["github"] = auth.NewGitHubProvider(cfg.OIDC.ClientID, cfg.OIDC.ClientSecret, cfg.OIDC.RedirectURL)
+		case "microsoft":
+			s.oidcProviders["microsoft"] = auth.NewMicrosoftProvider(cfg.OIDC.ClientID, cfg.OIDC.ClientSecret, cfg.OIDC.RedirectURL, cfg.OIDC.TenantID)
+		}
+	}
 
 	// Seed orgs and teams from config.
 	for _, oe := range cfg.Orgs {
@@ -179,7 +299,7 @@ func FromConfig(cfg *config.Config, provider base.LLM) *Server {
 		}
 	}
 
-	return s
+	return s, nil
 }
 
 // Start listens on addr (e.g. ":8080") and serves until the context is cancelled.
@@ -223,6 +343,11 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.collector.Handler())
 
+	// OIDC/SSO endpoints (unauthenticated — they perform their own auth flow).
+	mux.HandleFunc("GET /auth/login", s.handleAuthLogin)
+	mux.HandleFunc("GET /auth/callback", s.handleAuthCallback)
+	mux.HandleFunc("GET /auth/logout", s.handleAuthLogout)
+
 	// Authenticated LLM endpoints (require valid API key or JWT + rate limit).
 	authed := auth.RequireAuth(s.keyStore, s.jwtSecret)
 	limited := auth.RequireRateLimit(s.rateLimiter)
@@ -234,13 +359,22 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("POST /v1/embeddings", authedLimited(http.HandlerFunc(s.handleEmbeddings)))
 	mux.Handle("POST /v1/audio/speech", authedLimited(http.HandlerFunc(s.handleSpeech)))
 	mux.Handle("POST /v1/moderations", authedLimited(http.HandlerFunc(s.handleModerations)))
+	mux.Handle("POST /v1/batches", authedLimited(http.HandlerFunc(s.handleBatchCreate)))
+	mux.Handle("GET /v1/batches/{batch_id}", authed(http.HandlerFunc(s.handleBatchStatus)))
+	mux.Handle("POST /v1/batches/{batch_id}/cancel", authed(http.HandlerFunc(s.handleBatchCancel)))
+
+	// Admin UI — served from embedded static files.
+	uiFS := http.FileServer(http.FS(ui.Static))
+	mux.Handle("GET /admin/ui", http.StripPrefix("/admin", uiFS))
+	mux.Handle("GET /admin/ui/", http.StripPrefix("/admin", uiFS))
 
 	// Admin endpoints (require "admin" scope).
 	admin := auth.RequireScope(s.keyStore, "admin")
-	km := management.NewKeyManagement(s.keyStore)
+	km := management.NewKeyManagementWithRateLimiter(s.keyStore, s.rateLimiter)
 	mux.Handle("POST /admin/key/generate", admin(http.HandlerFunc(km.HandleGenerate)))
 	mux.Handle("DELETE /admin/key/delete", admin(http.HandlerFunc(km.HandleDelete)))
 	mux.Handle("GET /admin/keys", admin(http.HandlerFunc(km.HandleList)))
+	mux.Handle("PUT /admin/key/rate-limit", admin(http.HandlerFunc(km.HandleSetRateLimit)))
 	mux.Handle("GET /admin/models", admin(http.HandlerFunc(s.modelReg.HandleList)))
 	mux.Handle("POST /admin/models", admin(http.HandlerFunc(s.modelReg.HandleRegister)))
 	mux.Handle("POST /admin/router", admin(http.HandlerFunc(s.routerCfg.HandleDeploy)))
@@ -251,6 +385,22 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /admin/orgs", admin(http.HandlerFunc(s.handleListOrgs)))
 	mux.Handle("POST /admin/teams", admin(http.HandlerFunc(s.handleCreateTeam)))
 	mux.Handle("GET /admin/teams", admin(http.HandlerFunc(s.handleListTeams)))
+	mux.Handle("GET /admin/stats", admin(http.HandlerFunc(s.handleAdminStats)))
+	mux.Handle("GET /admin/audit-log", admin(http.HandlerFunc(s.auditLog.HandleList)))
+
+	// Prompt management endpoints.
+	mux.Handle("POST /admin/prompts", admin(http.HandlerFunc(s.promptStore.HandleCreate)))
+	mux.Handle("GET /admin/prompts", admin(http.HandlerFunc(s.promptStore.HandleList)))
+	mux.Handle("GET /admin/prompts/{id}", admin(http.HandlerFunc(s.promptStore.HandleGet)))
+	mux.Handle("PUT /admin/prompts/{id}", admin(http.HandlerFunc(s.promptStore.HandleUpdate)))
+	mux.Handle("DELETE /admin/prompts/{id}", admin(http.HandlerFunc(s.promptStore.HandleDelete)))
+	mux.Handle("POST /admin/prompts/{id}/render", admin(http.HandlerFunc(s.promptStore.HandleRender)))
+
+	// Webhook management endpoints.
+	mux.Handle("POST /admin/webhooks", admin(http.HandlerFunc(s.webhookStore.HandleRegister)))
+	mux.Handle("GET /admin/webhooks", admin(http.HandlerFunc(s.webhookStore.HandleList)))
+	mux.Handle("GET /admin/webhooks/{id}", admin(http.HandlerFunc(s.webhookStore.HandleGet)))
+	mux.Handle("DELETE /admin/webhooks/{id}", admin(http.HandlerFunc(s.webhookStore.HandleDelete)))
 
 	return mux
 }
@@ -420,8 +570,72 @@ type openAIChatRequest struct {
 }
 
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"` // string or []contentPart
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCalls  []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls,omitempty"`
+}
+
+// contentPart is one element of a multi-modal message content array.
+type contentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url,omitempty"`
+}
+
+// textContent extracts the plain text from an openAIMessage's content field,
+// which may be a JSON string or a JSON array of content parts.
+func (m *openAIMessage) textContent() string {
+	if len(m.Content) == 0 {
+		return ""
+	}
+	// Try plain string first.
+	var s string
+	if json.Unmarshal(m.Content, &s) == nil {
+		return s
+	}
+	// Array of content parts — concatenate text parts.
+	var parts []contentPart
+	if json.Unmarshal(m.Content, &parts) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" {
+			sb.WriteString(p.Text)
+		}
+	}
+	return sb.String()
+}
+
+// contentParts parses the content field into a slice of ContentPart.
+// Returns nil if content is a plain string (non-multimodal).
+func (m *openAIMessage) contentParts() []types.ContentPart {
+	if len(m.Content) == 0 {
+		return nil
+	}
+	var parts []contentPart
+	if json.Unmarshal(m.Content, &parts) != nil {
+		return nil
+	}
+	out := make([]types.ContentPart, 0, len(parts))
+	for _, p := range parts {
+		cp := types.ContentPart{Type: p.Type, Text: p.Text}
+		if p.ImageURL != nil {
+			cp.ImageURL = p.ImageURL.URL
+		}
+		out = append(out, cp)
+	}
+	return out
 }
 
 type openAIToolDef struct {
@@ -434,6 +648,7 @@ type openAIToolDef struct {
 }
 
 func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
+	handlerStart := time.Now()
 	var oaiReq openAIChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&oaiReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "could not parse request body")
@@ -455,17 +670,93 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		Stream:      oaiReq.Stream,
 	}
 	for _, m := range oaiReq.Messages {
+		text := m.textContent()
 		if m.Role == "system" {
-			req.System = m.Content
-		} else {
-			req.Messages = append(req.Messages, types.Message{
-				Role:    m.Role,
-				Content: m.Content,
+			req.System = text
+			continue
+		}
+		msg := types.Message{
+			Role:       m.Role,
+			Content:    text,
+			Parts:      m.contentParts(),
+			ToolCallID: m.ToolCallID,
+		}
+		for _, tc := range m.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, types.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
 			})
 		}
+		req.Messages = append(req.Messages, msg)
+	}
+	// Translate tool definitions.
+	for _, td := range oaiReq.Tools {
+		t := types.Tool{
+			Name:        td.Function.Name,
+			Description: td.Function.Description,
+		}
+		if p, ok := td.Function.Parameters["type"].(string); ok {
+			t.Parameters.Type = p
+		} else {
+			t.Parameters.Type = "object"
+		}
+		if props, ok := td.Function.Parameters["properties"].(map[string]interface{}); ok {
+			t.Parameters.Properties = make(map[string]types.Property, len(props))
+			for k, v := range props {
+				if pm, ok := v.(map[string]interface{}); ok {
+					prop := types.Property{}
+					if typ, ok := pm["type"].(string); ok {
+						prop.Type = typ
+					}
+					if desc, ok := pm["description"].(string); ok {
+						prop.Description = desc
+					}
+					t.Parameters.Properties[k] = prop
+				}
+			}
+		}
+		if req2, ok := td.Function.Parameters["required"].([]interface{}); ok {
+			for _, r := range req2 {
+				if s, ok := r.(string); ok {
+					t.Parameters.Required = append(t.Parameters.Required, s)
+				}
+			}
+		}
+		req.Tools = append(req.Tools, t)
 	}
 
 	ctx := r.Context()
+
+	// Pre-request budget enforcement.
+	apiKey := auth.APIKeyFromContext(ctx)
+	if apiKey != "" {
+		if keyInfo, ok := s.keyStore.ValidateAPIKey(apiKey); ok {
+			if keyInfo.SpendLimit > 0 && keyInfo.CurrentSpend >= keyInfo.SpendLimit {
+				writeError(w, http.StatusPaymentRequired, "budget_exceeded",
+					fmt.Sprintf("key spend limit of $%.4f reached", keyInfo.SpendLimit))
+				return
+			}
+			if keyInfo.OrgID != "" {
+				if org, ok := s.orgStore.GetOrg(keyInfo.OrgID); ok && org.Budget > 0 && org.CurrentSpend >= org.Budget {
+					writeError(w, http.StatusPaymentRequired, "budget_exceeded",
+						fmt.Sprintf("org budget of $%.4f reached", org.Budget))
+					return
+				}
+			}
+			if keyInfo.TeamID != "" {
+				if teams := s.orgStore.ListTeams(keyInfo.OrgID); len(teams) > 0 {
+					for _, t := range teams {
+						if t.ID == keyInfo.TeamID && t.Budget > 0 && t.CurrentSpend >= t.Budget {
+							writeError(w, http.StatusPaymentRequired, "budget_exceeded",
+								fmt.Sprintf("team budget of $%.4f reached", t.Budget))
+							return
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Guardrails — check request before sending to provider.
 	if s.guardrails != nil {
@@ -476,14 +767,18 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if oaiReq.Stream {
-		s.streamChatCompletion(w, r, ctx, req)
+		s.streamChatCompletion(w, r, ctx, req, handlerStart)
 		return
 	}
 
 	// Cache lookup (non-streaming only).
 	var cacheKey string
 	if s.cache != nil {
-		cacheKey = caching.GenerateCacheKey(req)
+		if _, ok := s.cache.(*caching.SemanticCache); ok {
+			cacheKey = caching.QueryText(req)
+		} else {
+			cacheKey = caching.GenerateCacheKey(req)
+		}
 		if cached, ok := s.cache.Get(cacheKey); ok {
 			writeJSON(w, http.StatusOK, buildOAIResponse(cached))
 			return
@@ -509,7 +804,6 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		s.cache.Set(cacheKey, resp, s.cacheTTL)
 	}
 
-	apiKey := auth.APIKeyFromContext(ctx)
 	// Track per-key spend and propagate to org/team budgets.
 	if cost, costErr := llmbridge.CompletionCost(resp); costErr == nil && cost > 0 {
 		if apiKey != "" {
@@ -531,11 +825,39 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		s.collector.RecordTokens(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
+	// Fire webhook callbacks for this completion.
+	s.fireCompletionWebhooks(ctx, resp, apiKey, "")
+
+	// Write audit entry.
+	if s.auditLog != nil {
+		entry := audit.Entry{
+			Timestamp: time.Now(),
+			APIKey:    audit.MaskKey(apiKey),
+			Model:     resp.Model,
+			Provider:  resp.Provider,
+			Status:    http.StatusOK,
+			UserIP:    r.RemoteAddr,
+			LatencyMS: time.Since(handlerStart).Milliseconds(),
+		}
+		if resp.Usage != nil {
+			entry.PromptTokens = resp.Usage.PromptTokens
+			entry.CompletionTokens = resp.Usage.CompletionTokens
+		}
+		if keyInfo, ok := s.keyStore.ValidateAPIKey(apiKey); ok {
+			entry.OrgID = keyInfo.OrgID
+			entry.TeamID = keyInfo.TeamID
+		}
+		if cost, cerr := llmbridge.CompletionCost(resp); cerr == nil {
+			entry.Cost = cost
+		}
+		s.auditLog.Record(entry)
+	}
+
 	// Translate to OpenAI response format.
 	writeJSON(w, http.StatusOK, buildOAIResponse(resp))
 }
 
-func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ctx context.Context, req types.Request) {
+func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ctx context.Context, req types.Request, handlerStart time.Time) {
 	streamer, ok := s.provider.(base.Streamer)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
@@ -560,6 +882,9 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ct
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
+	var promptTokens, completionTokens int
+	var totalContent strings.Builder
+
 	for delta := range ch {
 		if delta.Err != nil {
 			_, _ = io.WriteString(w, "data: {\"error\":\""+delta.Err.Error()+"\"}\n\n")
@@ -569,12 +894,58 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ct
 		if delta.Done {
 			_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			flusher.Flush()
-			return
+			break
 		}
+		totalContent.WriteString(delta.Content)
 		chunk := buildOAIStreamChunk(delta)
 		b, _ := json.Marshal(chunk)
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
+	}
+
+	// Estimate completion tokens from streamed content (providers rarely send usage in SSE).
+	completionTokens = len(strings.Fields(totalContent.String()))
+	streamAPIKey := auth.APIKeyFromContext(ctx)
+
+	syntheticResp := &types.Response{
+		Provider: s.provider.Name(),
+		Model:    req.Model,
+		Usage:    &types.UsageData{PromptTokens: promptTokens, CompletionTokens: completionTokens},
+	}
+
+	// Post-stream budget tracking (best-effort; cost estimate only).
+	if streamAPIKey != "" && promptTokens+completionTokens > 0 {
+		if cost, costErr := llmbridge.CompletionCost(syntheticResp); costErr == nil && cost > 0 {
+			_ = s.keyStore.RecordSpend(streamAPIKey, cost)
+			if keyInfo, ok := s.keyStore.ValidateAPIKey(streamAPIKey); ok {
+				if keyInfo.TeamID != "" {
+					_ = s.orgStore.RecordTeamSpend(keyInfo.TeamID, cost)
+				} else if keyInfo.OrgID != "" {
+					_ = s.orgStore.RecordOrgSpend(keyInfo.OrgID, cost)
+				}
+			}
+		}
+	}
+	s.collector.RecordTokens(promptTokens, completionTokens)
+	s.fireCompletionWebhooks(ctx, syntheticResp, streamAPIKey, "")
+
+	if s.auditLog != nil {
+		entry := audit.Entry{
+			Timestamp:        time.Now(),
+			APIKey:           audit.MaskKey(streamAPIKey),
+			Model:            req.Model,
+			Provider:         s.provider.Name(),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			Status:           http.StatusOK,
+			UserIP:           r.RemoteAddr,
+			LatencyMS:        time.Since(handlerStart).Milliseconds(),
+		}
+		if keyInfo, ok := s.keyStore.ValidateAPIKey(streamAPIKey); ok {
+			entry.OrgID = keyInfo.OrgID
+			entry.TeamID = keyInfo.TeamID
+		}
+		s.auditLog.Record(entry)
 	}
 }
 
@@ -840,6 +1211,244 @@ func newShortID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
+}
+
+// ---- Batch API handlers ----
+
+func (s *Server) handleBatchCreate(w http.ResponseWriter, r *http.Request) {
+	// If the underlying provider supports native batching, delegate to it.
+	if bp, ok := s.provider.(base.BatchProvider); ok {
+		var body struct {
+			Requests []types.Request `json:"requests"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
+			return
+		}
+		batchID, err := bp.BatchCreate(r.Context(), body.Requests)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "provider_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id": batchID, "object": "batch", "status": "queued",
+		})
+		return
+	}
+
+	// Fallback: run concurrently in-process.
+	var body struct {
+		Requests []types.Request `json:"requests"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
+		return
+	}
+	bID := "llmb_batch_" + newBatchID()
+	rec := &batchRecord{status: "in_progress", total: len(body.Requests)}
+	s.batchMu.Lock()
+	s.batchRecords[bID] = rec
+	s.batchMu.Unlock()
+
+	go func() {
+		results := llmbridge.BatchComplete(context.Background(), s.provider, body.Requests)
+		s.batchMu.Lock()
+		rec.results = results
+		rec.status = "completed"
+		s.batchMu.Unlock()
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":     bID,
+		"object": "batch",
+		"status": "in_progress",
+		"request_counts": map[string]int{
+			"total": len(body.Requests), "completed": 0, "failed": 0,
+		},
+	})
+}
+
+func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
+	batchID := r.PathValue("batch_id")
+
+	// Check in-process store first.
+	s.batchMu.RLock()
+	rec, ok := s.batchRecords[batchID]
+	s.batchMu.RUnlock()
+	if ok {
+		completed, failed := 0, 0
+		for _, res := range rec.results {
+			if res.Err != nil {
+				failed++
+			} else {
+				completed++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id":     batchID,
+			"object": "batch",
+			"status": rec.status,
+			"request_counts": map[string]int{
+				"total": rec.total, "completed": completed, "failed": failed,
+			},
+		})
+		return
+	}
+
+	// Delegate to native provider.
+	bp, ok := s.provider.(base.BatchProvider)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "batch not found")
+		return
+	}
+	status, counts, err := bp.BatchStatus(r.Context(), batchID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "provider_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id": batchID, "object": "batch", "status": status, "request_counts": counts,
+	})
+}
+
+func (s *Server) handleBatchCancel(w http.ResponseWriter, r *http.Request) {
+	batchID := r.PathValue("batch_id")
+	s.batchMu.Lock()
+	if rec, ok := s.batchRecords[batchID]; ok {
+		rec.status = "cancelled"
+	}
+	s.batchMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": batchID, "object": "batch", "status": "cancelled"})
+}
+
+func newBatchID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// ---- Admin stats handler ----
+
+func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
+	c := s.collector
+	totalRequests := c.Requests2xx.Load() + c.Requests4xx.Load() + c.Requests5xx.Load()
+	totalTokens := c.PromptTokens.Load() + c.CompletionTokens.Load()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"total_requests": totalRequests,
+		"total_tokens":   totalTokens,
+		"active_keys":    len(s.keyStore.ListKeys()),
+		"orgs_count":     len(s.orgStore.ListOrgs()),
+	})
+}
+
+// ---- Webhook helpers ----
+
+// fireCompletionWebhooks delivers a completion event to all matching webhooks.
+// orgID is derived from the API key's org if not provided directly.
+func (s *Server) fireCompletionWebhooks(ctx context.Context, resp *types.Response, apiKey, orgID string) {
+	if s.webhookStore == nil {
+		return
+	}
+	meta := map[string]string{}
+	if orgID == "" && apiKey != "" {
+		if ki, ok := s.keyStore.ValidateAPIKey(apiKey); ok {
+			orgID = ki.OrgID
+		}
+	}
+	if orgID != "" {
+		meta["org_id"] = orgID
+	}
+	event := callbacks.Event{
+		Type:     callbacks.EventResponse,
+		Provider: resp.Provider,
+		Model:    resp.Model,
+		Response: resp,
+		Metadata: meta,
+	}
+	s.webhookStore.Handler()(ctx, event)
+}
+
+// ---- OIDC/SSO handlers ----
+
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if len(s.oidcProviders) == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "OIDC authentication is not configured")
+		return
+	}
+	providerName := r.URL.Query().Get("provider")
+	p, ok := s.oidcProviders[providerName]
+	if !ok {
+		names := make([]string, 0, len(s.oidcProviders))
+		for k := range s.oidcProviders {
+			names = append(names, k)
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"unknown provider; supported: "+strings.Join(names, ", "))
+		return
+	}
+	state, err := s.oidcStates.Issue(providerName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "could not generate state token")
+		return
+	}
+	http.Redirect(w, r, p.AuthURL(state), http.StatusFound)
+}
+
+func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
+	code := r.URL.Query().Get("code")
+	if state == "" || code == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "state and code query parameters are required")
+		return
+	}
+	providerName, ok := s.oidcStates.Consume(state)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid or expired state token")
+		return
+	}
+	p, ok := s.oidcProviders[providerName]
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "server_error", "provider not found: "+providerName)
+		return
+	}
+	ctx := r.Context()
+	tok, err := p.Exchange(ctx, code)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "upstream_error", "token exchange failed: "+err.Error())
+		return
+	}
+	user, err := p.UserInfo(ctx, tok)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "upstream_error", "userinfo fetch failed: "+err.Error())
+		return
+	}
+	apiKey, err := s.oidcUpsertKey(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "could not issue API key: "+err.Error())
+		return
+	}
+	// Pass the key in the URL fragment so it is never sent to the server in logs.
+	http.Redirect(w, r, "/admin/ui#key="+apiKey, http.StatusFound)
+}
+
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/auth/login", http.StatusFound)
+}
+
+// oidcUpsertKey finds an existing SSO-issued key for the user or creates one.
+func (s *Server) oidcUpsertKey(user *auth.OIDCUser) (string, error) {
+	label := "sso:" + user.Email
+	for _, info := range s.keyStore.ListKeys() {
+		if info.Name == label {
+			return info.Key, nil
+		}
+	}
+	key, err := s.keyStore.GenerateAPIKey([]string{"completion"})
+	if err != nil {
+		return "", err
+	}
+	s.keyStore.SetKeyName(key, label)
+	return key, nil
 }
 
 // ---- Helpers ----

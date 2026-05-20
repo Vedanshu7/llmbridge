@@ -13,6 +13,30 @@ import (
 	"github.com/Vedanshu7/llmbridge/llms/openai/chat"
 )
 
+// getURL sends a GET to url with Bearer auth and returns the raw response bytes.
+func (p *Provider) getURL(url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, err.Error(), err)
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, err.Error(), err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.name, 0, "read body: "+err.Error(), err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, exceptions.ClassifyHTTPError(p.name, resp.StatusCode, raw)
+	}
+	return raw, nil
+}
+
 // post sends a JSON body to url and returns the parsed OAIResponse.
 func (p *Provider) post(body []byte) (*chat.OAIResponse, error) {
 	req, err := http.NewRequest(http.MethodPost, p.baseURL, bytes.NewReader(body))

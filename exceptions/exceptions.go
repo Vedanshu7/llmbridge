@@ -2,7 +2,10 @@
 // All errors embed APIError which carries provider, model, and HTTP status context.
 package exceptions
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // APIError is the base struct embedded by all concrete error types.
 // It carries the provider name, model, HTTP status code, and a human-readable message.
@@ -127,8 +130,44 @@ func NewInternalServerError(provider string, msg string, cause error) *InternalS
 	return &InternalServerError{APIError{LLMProvider: provider, StatusCode: 500, Message: msg, Cause: cause}}
 }
 
+// NewContextWindowExceededError constructs a ContextWindowExceededError.
+func NewContextWindowExceededError(provider string, statusCode int, msg string, cause error) *ContextWindowExceededError {
+	return &ContextWindowExceededError{APIError{LLMProvider: provider, StatusCode: statusCode, Message: msg, Cause: cause}}
+}
+
+// NewContentPolicyViolationError constructs a ContentPolicyViolationError.
+func NewContentPolicyViolationError(provider string, statusCode int, msg string, cause error) *ContentPolicyViolationError {
+	return &ContentPolicyViolationError{APIError{LLMProvider: provider, StatusCode: statusCode, Message: msg, Cause: cause}}
+}
+
+// isContextWindowBody returns true when the response body indicates the request
+// exceeded the model's context length.
+func isContextWindowBody(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "context_length_exceeded") ||
+		strings.Contains(lower, "context window") ||
+		strings.Contains(lower, "maximum context") ||
+		strings.Contains(lower, "token limit") ||
+		strings.Contains(lower, "too many tokens") ||
+		strings.Contains(lower, "reduce the length")
+}
+
+// isContentPolicyBody returns true when the response body indicates the provider's
+// safety system blocked the request.
+func isContentPolicyBody(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "content_policy_violation") ||
+		strings.Contains(lower, "content_filter") ||
+		strings.Contains(lower, "content policy") ||
+		strings.Contains(lower, "moderation") ||
+		strings.Contains(lower, "safety") ||
+		strings.Contains(lower, "blocked") ||
+		strings.Contains(lower, "harmful")
+}
+
 // ClassifyHTTPError maps an HTTP status code to the appropriate error type.
 // body is the raw response body (may be nil for streaming errors).
+// It inspects the body text to distinguish context-window and content-policy errors.
 func ClassifyHTTPError(provider string, statusCode int, body []byte) error {
 	msg := string(body)
 	switch {
@@ -136,8 +175,19 @@ func ClassifyHTTPError(provider string, statusCode int, body []byte) error {
 		return NewAuthError(provider, statusCode, fmt.Sprintf("HTTP %d: %s", statusCode, msg), nil)
 	case statusCode == 429:
 		return NewRateLimitError(provider, statusCode, fmt.Sprintf("HTTP %d: %s", statusCode, msg), nil)
+	case statusCode == 400 || statusCode == 422:
+		if isContextWindowBody(msg) {
+			return NewContextWindowExceededError(provider, statusCode, msg, nil)
+		}
+		if isContentPolicyBody(msg) {
+			return NewContentPolicyViolationError(provider, statusCode, msg, nil)
+		}
+		return NewProviderError(provider, statusCode, msg, nil)
 	case statusCode >= 500:
-		return NewRateLimitError(provider, statusCode, fmt.Sprintf("HTTP %d: %s", statusCode, msg), nil)
+		if isContentPolicyBody(msg) {
+			return NewContentPolicyViolationError(provider, statusCode, msg, nil)
+		}
+		return NewInternalServerError(provider, fmt.Sprintf("HTTP %d: %s", statusCode, msg), nil)
 	default:
 		return NewProviderError(provider, statusCode, msg, nil)
 	}

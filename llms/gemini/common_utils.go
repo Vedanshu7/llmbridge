@@ -42,6 +42,28 @@ func (p *Provider) post(body []byte) (*chat.GeminiResponse, error) {
 	return &out, nil
 }
 
+func (p *Provider) postRaw(url string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "read body: "+err.Error(), err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, exceptions.ClassifyHTTPError(p.Name(), resp.StatusCode, raw)
+	}
+	return raw, nil
+}
+
 func (p *Provider) newStreamConn(body []byte) (*http.Response, error) {
 	url := p.streamGenerateContentURL()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))

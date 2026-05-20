@@ -196,7 +196,7 @@ func TestLeastBusyPicksLessLoaded(t *testing.T) {
 	r.inflight[1] = 0
 	r.mu.Unlock()
 
-	order := r.pickOrder()
+	order := r.pickOrder(types.Request{})
 	if order[0] != 1 {
 		t.Fatalf("expected p2 (idx 1) first, got idx %d", order[0])
 	}
@@ -219,7 +219,7 @@ func TestCostBasedPicksCheapest(t *testing.T) {
 	r.spent[1] = 1.0
 	r.mu.Unlock()
 
-	order := r.pickOrder()
+	order := r.pickOrder(types.Request{})
 	if order[0] != 1 {
 		t.Fatalf("expected cheap provider (idx 1) first, got idx %d", order[0])
 	}
@@ -359,6 +359,95 @@ func TestCheckAllHealthUpdatesStatus(t *testing.T) {
 }
 
 // ---- Health recording ----
+
+// ---- WithContentPolicyFallback ----
+
+func TestContentPolicyFallback(t *testing.T) {
+	p1 := &fakeProvider{name: "strict", err: &exceptions.ContentPolicyViolationError{}}
+	p2 := goodProvider("permissive")
+
+	r := NewRouter(
+		[]Provider{p1, p2},
+		WithContentPolicyFallback(true),
+	)
+	resp, err := r.Complete(context.Background(), types.Request{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Provider != "permissive" {
+		t.Errorf("expected permissive provider, got %q", resp.Provider)
+	}
+}
+
+func TestContentPolicyFallbackDisabled(t *testing.T) {
+	cpErr := &exceptions.ContentPolicyViolationError{}
+	p1 := &fakeProvider{name: "strict", err: cpErr}
+	p2 := goodProvider("permissive")
+
+	r := NewRouter(
+		[]Provider{p1, p2},
+		WithContentPolicyFallback(false),
+	)
+	_, err := r.Complete(context.Background(), types.Request{})
+	if err == nil {
+		t.Fatal("expected error when content policy fallback is disabled")
+	}
+}
+
+// ---- WithRoutingGroups ----
+
+func TestWithRoutingGroupsStored(t *testing.T) {
+	p := goodProvider("p")
+	groups := []RoutingGroup{
+		{Name: "chat", Providers: []Provider{p}, Strategy: PriorityOrder},
+		{Name: "embed", Providers: []Provider{p}, Strategy: RoundRobin},
+	}
+	r := NewRouter([]Provider{p}, WithRoutingGroups(groups))
+	if len(r.groups) != 2 {
+		t.Fatalf("expected 2 routing groups, got %d", len(r.groups))
+	}
+	if r.groups[0].Name != "chat" {
+		t.Errorf("groups[0].Name = %q", r.groups[0].Name)
+	}
+	if r.groups[1].Strategy != RoundRobin {
+		t.Errorf("groups[1].Strategy = %v", r.groups[1].Strategy)
+	}
+}
+
+// ---- Router.Name / Router.ValidateEnvironment ----
+
+func TestRouterName(t *testing.T) {
+	r := NewRouter([]Provider{goodProvider("p")})
+	if r.Name() != "router" {
+		t.Errorf("Name() = %q, want router", r.Name())
+	}
+}
+
+func TestRouterValidateEnvironment(t *testing.T) {
+	r := NewRouter([]Provider{goodProvider("p")})
+	if err := r.ValidateEnvironment(); err != nil {
+		t.Fatalf("ValidateEnvironment() returned unexpected error: %v", err)
+	}
+}
+
+// ---- minDuration helper ----
+
+func TestMinDuration(t *testing.T) {
+	cases := []struct {
+		a, b time.Duration
+		want time.Duration
+	}{
+		{time.Second, 2 * time.Second, time.Second},
+		{3 * time.Second, time.Second, time.Second},
+		{time.Second, time.Second, time.Second},
+		{0, time.Second, 0},
+	}
+	for _, c := range cases {
+		if got := minDuration(c.a, c.b); got != c.want {
+			t.Errorf("minDuration(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
 
 func TestRecordSuccess(t *testing.T) {
 	p := goodProvider("p")

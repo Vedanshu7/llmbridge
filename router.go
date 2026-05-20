@@ -11,6 +11,15 @@ import (
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
+// TrafficSplitGroup defines one labeled experiment arm for TrafficSplit routing.
+// ProviderIdx is the index into the Router's provider slice; Weight controls
+// how often this arm is selected relative to the others.
+type TrafficSplitGroup struct {
+	Label       string // experiment arm label (for observability)
+	ProviderIdx int    // index into the Router's provider slice
+	Weight      int    // relative traffic weight; 0 treated as 1
+}
+
 // HealthStatus records the last known health of a provider.
 type HealthStatus struct {
 	Healthy       bool
@@ -51,6 +60,10 @@ const (
 
 	// Weighted distributes traffic proportionally to each provider's Weight field.
 	Weighted
+
+	// TrafficSplit routes by explicit percentage splits across labeled experiment groups.
+	// Configure via WithTrafficSplit.
+	TrafficSplit
 )
 
 // RetryPolicy controls per-provider retry behavior inside the Router.
@@ -97,7 +110,12 @@ type Router struct {
 	groups    []RoutingGroup
 
 	contextWindowFallback bool
+	contentPolicyFallback bool
 	requiredTags          []string
+
+	splitGroups       []TrafficSplitGroup
+	maxCostPerRequest float64 // 0 = no limit; >0 = reject requests estimated to cost more
+	autoVisionRouting bool    // prefer "vision"-tagged providers when request has images
 
 	cbThreshold int           // circuit breaker: failures before cooldown (0 = disabled)
 	cbCooldown  time.Duration // circuit breaker: cooldown duration
@@ -205,6 +223,14 @@ func WithContextWindowFallback(enabled bool) RouterOption {
 	return func(r *Router) { r.contextWindowFallback = enabled }
 }
 
+// WithContentPolicyFallback enables failover when a provider returns a
+// ContentPolicyViolationError, trying the next provider in the order.
+// Useful when providers have different content policies and a stricter
+// provider is listed first.
+func WithContentPolicyFallback(enabled bool) RouterOption {
+	return func(r *Router) { r.contentPolicyFallback = enabled }
+}
+
 // WithRequiredTags restricts routing to providers whose tag set is a superset
 // of all the given tags. Only meaningful when using NewTagRouter.
 func WithRequiredTags(tags []string) RouterOption {
@@ -224,6 +250,32 @@ func WithCircuitBreaker(threshold int, cooldown time.Duration) RouterOption {
 		r.cbThreshold = threshold
 		r.cbCooldown = cooldown
 	}
+}
+
+// WithTrafficSplit configures explicit experiment arms and switches the strategy
+// to TrafficSplit. Each group specifies a provider index and relative weight.
+// On every request one arm is chosen by weighted random selection; the remaining
+// eligible providers serve as ordered fallbacks if that arm fails.
+func WithTrafficSplit(groups []TrafficSplitGroup) RouterOption {
+	return func(r *Router) {
+		r.splitGroups = groups
+		r.strategy = TrafficSplit
+	}
+}
+
+// WithMaxCostPerRequest limits each request to the given USD budget. The router
+// estimates input cost from message length and the request model's pricing entry.
+// Requests that are estimated to exceed the budget are rejected with an error
+// before any provider is contacted.
+func WithMaxCostPerRequest(dollars float64) RouterOption {
+	return func(r *Router) { r.maxCostPerRequest = dollars }
+}
+
+// WithAutoVisionRouting makes the router prefer providers tagged "vision" when
+// the incoming request contains image_url content parts. Falls back to all
+// eligible providers if none are tagged "vision".
+func WithAutoVisionRouting() RouterOption {
+	return func(r *Router) { r.autoVisionRouting = true }
 }
 
 // WithHealthChecks starts a background goroutine that calls ValidateEnvironment()
@@ -252,7 +304,12 @@ func (r *Router) ValidateEnvironment() error { return nil }
 
 // Complete implements Provider.
 func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Response, error) {
-	order := r.pickOrder()
+	if r.maxCostPerRequest > 0 {
+		if est := estimateInputCost(req); est > r.maxCostPerRequest {
+			return nil, exceptions.NewProviderError("router", 400, "estimated request cost exceeds per-request limit", nil)
+		}
+	}
+	order := r.pickOrder(req)
 	var lastErr error
 	for _, idx := range order {
 		p := r.providers[idx]
@@ -300,11 +357,15 @@ func (r *Router) recordFailure(idx int) {
 
 // isFallbackable returns true if the error should trigger failover to the next provider.
 func (r *Router) isFallbackable(err error) bool {
-	if !r.contextWindowFallback {
-		return false
-	}
 	var cw *exceptions.ContextWindowExceededError
-	return errors.As(err, &cw)
+	if r.contextWindowFallback && errors.As(err, &cw) {
+		return true
+	}
+	var cp *exceptions.ContentPolicyViolationError
+	if r.contentPolicyFallback && errors.As(err, &cp) {
+		return true
+	}
+	return false
 }
 
 // tryWithPolicy executes one provider with the configured retry policy.
@@ -323,6 +384,11 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Reques
 
 		if err == nil {
 			r.recordLatency(idx, elapsed)
+			if cost, cerr := CompletionCost(resp); cerr == nil && cost > 0 {
+				r.mu.Lock()
+				r.spent[idx] += cost
+				r.mu.Unlock()
+			}
 			return resp, nil
 		}
 		lastErr = err
@@ -342,7 +408,7 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Reques
 	return nil, lastErr
 }
 
-func (r *Router) pickOrder() []int {
+func (r *Router) pickOrder(req types.Request) []int {
 	n := len(r.providers)
 
 	r.mu.Lock()
@@ -371,11 +437,54 @@ func (r *Router) pickOrder() []int {
 		eligible = seqOrder(n)
 	}
 
+	// Prefer vision-capable providers when the request contains image content.
+	if r.autoVisionRouting && hasImageContent(req) {
+		visionEligible := make([]int, 0, len(eligible))
+		for _, idx := range eligible {
+			if hasAllTags(r.tags[idx], []string{"vision"}) {
+				visionEligible = append(visionEligible, idx)
+			}
+		}
+		if len(visionEligible) > 0 {
+			eligible = visionEligible
+		}
+	}
+
 	if len(eligible) == 1 {
 		return eligible
 	}
 
 	switch r.strategy {
+	case TrafficSplit:
+		eligibleSet := make(map[int]bool, len(eligible))
+		for _, idx := range eligible {
+			eligibleSet[idx] = true
+		}
+		var pool []int
+		for _, g := range r.splitGroups {
+			if !eligibleSet[g.ProviderIdx] {
+				continue
+			}
+			w := g.Weight
+			if w <= 0 {
+				w = 1
+			}
+			for range w {
+				pool = append(pool, g.ProviderIdx)
+			}
+		}
+		if len(pool) == 0 {
+			return eligible // no matching split groups; fall back to priority
+		}
+		chosen := pool[rand.IntN(len(pool))]
+		out := []int{chosen}
+		for _, idx := range eligible {
+			if idx != chosen {
+				out = append(out, idx)
+			}
+		}
+		return out
+
 	case RoundRobin:
 		k := len(eligible)
 		start := r.robin % k
@@ -562,6 +671,41 @@ func sortedByFloat(vals []float64) []int {
 		}
 	}
 	return order
+}
+
+// hasImageContent returns true if any message in the request contains an image_url part.
+func hasImageContent(req types.Request) bool {
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			if p.Type == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// estimateInputCost approximates the cost of a request before it is sent.
+// It sums the character lengths of all message text fields, divides by 4 to
+// estimate tokens, and multiplies by the model's InputCostPerToken from
+// ModelInfoDB. Returns 0 when the model is not in the database.
+func estimateInputCost(req types.Request) float64 {
+	info, ok := ModelInfoDB[req.Model]
+	if !ok || info.InputCostPerToken == 0 {
+		return 0
+	}
+	var chars int
+	if req.System != "" {
+		chars += len(req.System)
+	}
+	for _, m := range req.Messages {
+		chars += len(m.Content)
+		for _, p := range m.Parts {
+			chars += len(p.Text)
+		}
+	}
+	tokens := chars / 4
+	return float64(tokens) * info.InputCostPerToken
 }
 
 func isRetryable(err error) bool {

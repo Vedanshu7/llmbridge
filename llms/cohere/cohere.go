@@ -17,9 +17,11 @@ import (
 const (
 	chatURL   = "https://api.cohere.com/v2/chat"
 	rerankURL = "https://api.cohere.com/v1/rerank"
+	embedURL  = "https://api.cohere.com/v1/embed"
 
 	defaultModel       = "command-r-plus-08-2024"
 	defaultRerankModel = "rerank-v3.5"
+	defaultEmbedModel  = "embed-english-v3.0"
 )
 
 // Provider calls the Cohere chat and rerank APIs.
@@ -98,6 +100,31 @@ func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.
 		chat.ReadSSE(ctx, p.Name(), resp.Body, ch)
 	}()
 	return ch, nil
+}
+
+// Embed implements base.EmbedProvider using the Cohere /v1/embed endpoint.
+// The default model is embed-english-v3.0.
+func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+	wireReq := map[string]interface{}{
+		"texts":      texts,
+		"model":      defaultEmbedModel,
+		"input_type": "search_document",
+	}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
+	}
+	raw, err := p.postRaw(embedURL, body)
+	if err != nil {
+		return nil, err
+	}
+	var wire struct {
+		Embeddings [][]float64 `json:"embeddings"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "parse embeddings: "+err.Error(), err)
+	}
+	return wire.Embeddings, nil
 }
 
 // Rerank implements base.Reranker using the Cohere /v1/rerank endpoint.
