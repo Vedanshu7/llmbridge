@@ -1,0 +1,39 @@
+pull_request_rules:
+  - name: Auto-merge owner PRs when CI passes
+    conditions:
+      - author = Vedanshu7
+      - check-success = Build & Vet (1.25)
+      - check-success = Test
+      - check-success = Lint
+      - check-success = go mod tidy
+      - -draft
+    actions:
+      review:
+        type: APPROVE
+        message: "CI passed — auto-approved."
+      merge:
+        method: squash
+
+  - name: Request changes on failing CI
+    conditions:
+      - check-failure ~= ^(Build|Test|Lint|go mod tidy)
+      - -draft
+    actions:
+      comment:
+        message: "CI is failing — please fix the failing checks before this PR can be merged."
+
+  - name: Auto-label based on branch name
+    conditions:
+      - head ~= ^feat/
+    actions:
+      label:
+        add:
+          - enhancement
+
+  - name: Auto-label bug fixes
+    conditions:
+      - head ~= ^fix/
+    actions:
+      label:
+        add:
+          - bug
