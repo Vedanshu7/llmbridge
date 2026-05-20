@@ -179,10 +179,13 @@ func TestHandlerFiltersOrgID(t *testing.T) {
 }
 
 func TestHMACSignature(t *testing.T) {
+	var mu sync.Mutex
 	var sigHeader string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		sigHeader = r.Header.Get("X-LLMBridge-Signature")
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -199,17 +202,24 @@ func TestHMACSignature(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if sigHeader != "" {
+		mu.Lock()
+		got := sigHeader
+		mu.Unlock()
+		if got != "" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if sigHeader == "" {
+	mu.Lock()
+	got := sigHeader
+	mu.Unlock()
+
+	if got == "" {
 		t.Fatal("expected X-LLMBridge-Signature header")
 	}
-	if len(sigHeader) < 7 || sigHeader[:7] != "sha256=" {
-		t.Errorf("signature = %q, want sha256=...", sigHeader)
+	if len(got) < 7 || got[:7] != "sha256=" {
+		t.Errorf("signature = %q, want sha256=...", got)
 	}
 }
 
