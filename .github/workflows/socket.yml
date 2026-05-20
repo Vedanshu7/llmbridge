@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: nicholasgasior/gha-socket@v1
+
+      - name: Socket Security Check
+        uses: SocketDev/socket-security-action@v2
         with:
-          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+          api-key: ${{ secrets.SOCKET_SECURITY_API_KEY }}
