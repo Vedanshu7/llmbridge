@@ -4,6 +4,9 @@
 [![CI](https://github.com/Vedanshu7/llmbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Vedanshu7/llmbridge/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Vedanshu7/llmbridge)](https://goreportcard.com/report/github.com/Vedanshu7/llmbridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Vedanshu7/llmbridge)](https://github.com/Vedanshu7/llmbridge/releases)
+[![codecov](https://codecov.io/gh/Vedanshu7/llmbridge/branch/main/graph/badge.svg)](https://codecov.io/gh/Vedanshu7/llmbridge)
+[![CodeQL](https://github.com/Vedanshu7/llmbridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/Vedanshu7/llmbridge/actions/workflows/codeql.yml)
 
 A unified Go interface to multiple LLM providers.
 

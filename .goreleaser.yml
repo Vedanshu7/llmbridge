@@ -1,0 +1,64 @@
+version: 2
+
+project_name: llmbridge
+
+before:
+  hooks:
+    - go mod tidy
+    - go build ./...
+
+builds:
+  - id: proxy
+    main: ./proxy/cmd/main.go
+    binary: llmbridge-proxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore"
+      - "^docs"
+      - "^test"
+  groups:
+    - title: "New Features"
+      regexp: "^feat"
+    - title: "Bug Fixes"
+      regexp: "^fix"
+    - title: "Performance"
+      regexp: "^perf"
+
+release:
+  github:
+    owner: Vedanshu7
+    name: llmbridge
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    go get github.com/Vedanshu7/llmbridge@{{ .Tag }}
+    ```
+
+    **Full Changelog**: https://github.com/Vedanshu7/llmbridge/compare/{{ .PreviousTag }}...{{ .Tag }}
