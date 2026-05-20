@@ -9,6 +9,8 @@ A unified Go interface to multiple LLM providers — zero external dependencies.
 
 Switch between OpenAI, Anthropic, Ollama, Groq, Together AI, or any OpenAI-compatible endpoint by changing one line. Your application code never changes.
 
+> **Inspired by [LiteLLM](https://github.com/BerriAI/litellm)** — a Go-native reimplementation of its core concepts: unified provider interface, proxy server, routing, caching, spend tracking, and observability. All code is written from scratch in Go with no Python dependency.
+
 ## Architecture
 
 ```
