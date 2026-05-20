@@ -1,13 +1,13 @@
 version: "2"
 
-issues:
+linters:
   exclusions:
     rules:
       # Defer close calls are idiomatic Go — errors are unactionable at that point.
       - text: "Error return value of.*\\.Close.*is not checked"
         linters: [errcheck]
       # fmt.Fprintf/Fprint to http.ResponseWriter: write errors indicate a broken
-      # connection and there's nothing useful to do once headers are sent.
+      # connection and nothing useful can be done once headers are sent.
       - text: "Error return value of `fmt\\.Fprintf` is not checked"
         linters: [errcheck]
       - text: "Error return value of `fmt\\.Fprint` is not checked"
