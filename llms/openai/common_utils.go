@@ -122,7 +122,9 @@ func buildTranscribeForm(audio []byte, model, language, format string) ([]byte, 
 	if format != "" && format != "json" {
 		_ = w.WriteField("response_format", format)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
 	return buf.Bytes(), w.FormDataContentType(), nil
 }
 

@@ -465,7 +465,9 @@ func (p *Provider) uploadBatchFile(jsonl []byte) (string, error) {
 	if _, err := fw.Write(jsonl); err != nil {
 		return "", exceptions.NewProviderError(p.name, 0, "write jsonl: "+err.Error(), err)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return "", exceptions.NewProviderError(p.name, 0, "close form writer: "+err.Error(), err)
+	}
 	raw, err := p.postURLContentType("https://api.openai.com/v1/files", bufBody.Bytes(), w.FormDataContentType())
 	if err != nil {
 		return "", err

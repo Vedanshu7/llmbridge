@@ -49,11 +49,9 @@ func TestSessionAdd(t *testing.T) {
 	if s.Messages[0].Content != "hello" {
 		t.Errorf("Messages[0].Content = %q", s.Messages[0].Content)
 	}
-	if !s.UpdatedAt.After(before) && s.UpdatedAt.Equal(before) {
-		// UpdatedAt may be equal if Add executes within same nanosecond —
-		// just ensure it's not before.
+	if s.UpdatedAt.Before(before) {
+		t.Errorf("UpdatedAt %v before start %v", s.UpdatedAt, before)
 	}
-	_ = before
 }
 
 func TestSessionSaveAndLoad(t *testing.T) {

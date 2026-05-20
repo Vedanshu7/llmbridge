@@ -391,8 +391,8 @@ func mintRS256JWT(t *testing.T, key *rsa.PrivateKey, kid string, claims map[stri
 	token := sigInput + "." + b64url(sig)
 
 	// Build minimal JWKS.
-	nB := key.PublicKey.N.Bytes()
-	eB := big.NewInt(int64(key.PublicKey.E)).Bytes()
+	nB := key.N.Bytes()
+	eB := big.NewInt(int64(key.E)).Bytes()
 	jwksJSON, _ := json.Marshal(map[string]interface{}{
 		"keys": []map[string]string{
 			{"kid": kid, "kty": "RSA", "alg": "RS256",

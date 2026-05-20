@@ -128,13 +128,6 @@ func (fr *fakeRedis) dispatch(args []string) string {
 	}
 }
 
-func (fr *fakeRedis) get(key string) (string, bool) {
-	fr.mu.Lock()
-	defer fr.mu.Unlock()
-	v, ok := fr.data[key]
-	return v, ok
-}
-
 // ---- Tests ----
 
 func TestRedisNewCacheConnectFailure(t *testing.T) {

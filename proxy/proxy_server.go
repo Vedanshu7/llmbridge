@@ -310,7 +310,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	}
 
 	// Wrap mux: metrics first (outermost), then optional access log.
-	var handler http.Handler = s.collector.Middleware(s.mux)
+	handler := s.collector.Middleware(s.mux)
 	if s.logFile != "" {
 		f, err := os.OpenFile(s.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {

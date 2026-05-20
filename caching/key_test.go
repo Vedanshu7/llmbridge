@@ -50,7 +50,7 @@ func TestGenerateCacheKeyIsHex(t *testing.T) {
 		t.Fatalf("expected 64-char hex SHA-256, got %d chars: %s", len(k), k)
 	}
 	for _, c := range k {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("non-hex character %q in key %s", c, k)
 		}
 	}
