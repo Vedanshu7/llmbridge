@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://github.com/Vedanshu7/llmbridge/discussions
+    about: Use GitHub Discussions for questions and general help
+  - name: New provider request
+    url: https://github.com/Vedanshu7/llmbridge/issues/new?template=feature_request.md
+    about: Request a new LLM provider integration
