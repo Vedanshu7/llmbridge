@@ -36,7 +36,7 @@ jobs:
   validate-branch:
     name: Validate branch name
     runs-on: ubuntu-latest
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ !startsWith(github.head_ref, 'dependabot/') }}
     steps:
       - name: Check branch naming convention
         run: |
