@@ -430,6 +430,90 @@ func TestRouterValidateEnvironment(t *testing.T) {
 	}
 }
 
+// ---- WithFallbackChain ----
+
+func TestFallbackChainSucceedsOnFallbackModel(t *testing.T) {
+	var calledWith string
+	smart := &callRecordProvider{
+		name: "smart",
+		fn: func(req types.Request) (*types.Response, error) {
+			calledWith = req.Model
+			if req.Model == "fallback-model" {
+				return &types.Response{Content: "fallback ok", Provider: "smart"}, nil
+			}
+			return nil, &exceptions.ServiceUnavailableError{
+				APIError: exceptions.APIError{LLMProvider: "smart", StatusCode: 503},
+			}
+		},
+	}
+
+	r := NewRouter(
+		[]Provider{smart},
+		WithFallbackChain("primary-model", "fallback-model"),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+	resp, err := r.Complete(context.Background(), types.Request{Model: "primary-model"})
+	if err != nil {
+		t.Fatalf("expected fallback to succeed: %v", err)
+	}
+	if resp.Content != "fallback ok" {
+		t.Errorf("unexpected content: %s", resp.Content)
+	}
+	if calledWith != "fallback-model" {
+		t.Errorf("expected last call with fallback-model, got %q", calledWith)
+	}
+}
+
+func TestFallbackChainExhaustedReturnsLastError(t *testing.T) {
+	bad := &callRecordProvider{
+		name: "bad",
+		fn: func(_ types.Request) (*types.Response, error) {
+			return nil, &exceptions.ServiceUnavailableError{
+				APIError: exceptions.APIError{LLMProvider: "bad", StatusCode: 503},
+			}
+		},
+	}
+	r := NewRouter(
+		[]Provider{bad},
+		WithFallbackChain("model-a", "model-b", "model-c"),
+		WithRetryPolicy(RetryPolicy{MaxAttempts: 1}),
+	)
+	_, err := r.Complete(context.Background(), types.Request{Model: "model-a"})
+	if err == nil {
+		t.Fatal("expected error after all fallbacks exhausted")
+	}
+}
+
+func TestSetFallbackChainsReplaces(t *testing.T) {
+	p := goodProvider("p")
+	r := NewRouter([]Provider{p}, WithFallbackChain("old", "old-fallback"))
+	r.SetFallbackChains(map[string][]string{"new": {"new-fallback"}})
+
+	r.mu.Lock()
+	_, hasOld := r.fallbackChains["old"]
+	_, hasNew := r.fallbackChains["new"]
+	r.mu.Unlock()
+
+	if hasOld {
+		t.Error("old chain should have been replaced")
+	}
+	if !hasNew {
+		t.Error("new chain should be present after SetFallbackChains")
+	}
+}
+
+// callRecordProvider is a Provider whose Complete behaviour is driven by a func.
+type callRecordProvider struct {
+	name string
+	fn   func(types.Request) (*types.Response, error)
+}
+
+func (c *callRecordProvider) Complete(_ context.Context, req types.Request) (*types.Response, error) {
+	return c.fn(req)
+}
+func (c *callRecordProvider) Name() string                { return c.name }
+func (c *callRecordProvider) ValidateEnvironment() error  { return nil }
+
 // ---- minDuration helper ----
 
 func TestMinDuration(t *testing.T) {

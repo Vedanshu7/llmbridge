@@ -264,6 +264,13 @@ func fromConfig(cfg *config.Config, provider base.LLM, dbPath string) (*Server, 
 		}
 	}
 
+	// Wire per-model fallback chains onto the router when the provider is one.
+	if cfg.Router != nil && len(cfg.Router.FallbackModels) > 0 {
+		if r, ok := provider.(*llmbridge.Router); ok {
+			r.SetFallbackChains(cfg.Router.FallbackModels)
+		}
+	}
+
 	// Wire caching from config.
 	if cfg.CacheTTLSeconds != -1 {
 		ttl := 5 * time.Minute

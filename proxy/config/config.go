@@ -161,13 +161,18 @@ type ModelEntry struct {
 	Model string `json:"model"`
 }
 
-// RouterConfig sets routing strategy and retry policy.
+// RouterConfig sets routing strategy, retry policy, and per-model fallbacks.
 type RouterConfig struct {
 	// Strategy is one of: "priority", "round_robin", "least_latency",
 	// "least_busy", "cost_based".
 	Strategy string `json:"strategy,omitempty"`
 	// Retries is the maximum retry attempts per provider.
 	Retries int `json:"retries,omitempty"`
+	// FallbackModels maps a primary model name to an ordered list of fallback
+	// model names. When all providers fail a request for the primary model, the
+	// router retries with each fallback model in sequence.
+	// Example: {"gpt-4o": ["gpt-4o-mini", "gpt-3.5-turbo"]}
+	FallbackModels map[string][]string `json:"fallback_models,omitempty"`
 }
 
 // Load reads and parses a JSON config file from path.

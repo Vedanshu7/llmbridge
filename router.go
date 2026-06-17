@@ -120,6 +120,11 @@ type Router struct {
 	cbThreshold int           // circuit breaker: failures before cooldown (0 = disabled)
 	cbCooldown  time.Duration // circuit breaker: cooldown duration
 
+	// fallbackChains maps a primary model name to an ordered list of fallback
+	// model names. When all providers fail a request for the primary model, the
+	// router retries the full provider order once per fallback model in sequence.
+	fallbackChains map[string][]string
+
 	mu       sync.Mutex
 	robin    int
 	latency  []time.Duration
@@ -278,6 +283,26 @@ func WithAutoVisionRouting() RouterOption {
 	return func(r *Router) { r.autoVisionRouting = true }
 }
 
+// WithFallbackChain registers an ordered list of fallback models for primary.
+// When all providers fail a request for primary, the router retries the full
+// provider order once per fallback model before surfacing the final error.
+func WithFallbackChain(primary string, fallbacks ...string) RouterOption {
+	return func(r *Router) {
+		if r.fallbackChains == nil {
+			r.fallbackChains = make(map[string][]string)
+		}
+		r.fallbackChains[primary] = fallbacks
+	}
+}
+
+// SetFallbackChains replaces the fallback chain map atomically.
+// Intended for use by proxy configuration loaders.
+func (r *Router) SetFallbackChains(chains map[string][]string) {
+	r.mu.Lock()
+	r.fallbackChains = chains
+	r.mu.Unlock()
+}
+
 // WithHealthChecks starts a background goroutine that calls ValidateEnvironment()
 // on each provider every interval. Providers that error are marked unhealthy and
 // skipped in routing until they recover.
@@ -309,6 +334,33 @@ func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Respon
 			return nil, exceptions.NewProviderError("router", 400, "estimated request cost exceeds per-request limit", nil)
 		}
 	}
+
+	resp, err := r.dispatchOnce(ctx, req)
+	if err == nil {
+		return resp, nil
+	}
+
+	// Try per-model fallback chain when the primary model fails.
+	r.mu.Lock()
+	fallbacks := r.fallbackChains[req.Model]
+	r.mu.Unlock()
+	for _, fallbackModel := range fallbacks {
+		fallbackReq := req
+		fallbackReq.Model = fallbackModel
+		resp, ferr := r.dispatchOnce(ctx, fallbackReq)
+		if ferr == nil {
+			return resp, nil
+		}
+		err = ferr
+	}
+
+	return nil, err
+}
+
+// dispatchOnce attempts the request against each provider in pickOrder, applying
+// the retry policy per provider. It returns on the first success, or the last
+// error once all providers are exhausted or a non-retryable error is hit.
+func (r *Router) dispatchOnce(ctx context.Context, req types.Request) (*types.Response, error) {
 	order := r.pickOrder(req)
 	var lastErr error
 	for _, idx := range order {
