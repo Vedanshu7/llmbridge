@@ -26,6 +26,7 @@ package proxy
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -90,6 +91,8 @@ type Server struct {
 	// OIDC/SSO
 	oidcProviders map[string]*auth.OIDCProvider // name → provider
 	oidcStates    *auth.OIDCStateStore
+
+	usageDB *sql.DB // non-nil when backed by SQLite; used for usage_records writes
 }
 
 // NewServer constructs a Server backed by the given LLM provider.
@@ -147,6 +150,7 @@ func NewServerWithDB(provider base.LLM, dbPath string) (*Server, error) {
 		auditLog:      audit.New(1000),
 		oidcProviders: make(map[string]*auth.OIDCProvider),
 		oidcStates:    auth.NewOIDCStateStore(),
+		usageDB:       db,
 	}
 	s.mux = s.buildMux()
 	return s, nil
@@ -393,6 +397,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("POST /admin/teams", admin(http.HandlerFunc(s.handleCreateTeam)))
 	mux.Handle("GET /admin/teams", admin(http.HandlerFunc(s.handleListTeams)))
 	mux.Handle("GET /admin/stats", admin(http.HandlerFunc(s.handleAdminStats)))
+	mux.Handle("GET /admin/usage", admin(http.HandlerFunc(s.handleAdminUsage)))
 	mux.Handle("GET /admin/audit-log", admin(http.HandlerFunc(s.auditLog.HandleList)))
 
 	// Prompt management endpoints.
@@ -824,6 +829,32 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Record granular usage for analytics.
+	if s.usageDB != nil {
+		var orgID, teamID string
+		if keyInfo, ok := s.keyStore.ValidateAPIKey(apiKey); ok {
+			orgID = keyInfo.OrgID
+			teamID = keyInfo.TeamID
+		}
+		rec := persistence.UsageRecord{
+			ID:        newBatchID(),
+			Key:       apiKey,
+			OrgID:     orgID,
+			TeamID:    teamID,
+			Model:     resp.Model,
+			Provider:  resp.Provider,
+			Timestamp: time.Now(),
+		}
+		if resp.Usage != nil {
+			rec.PromptTokens = resp.Usage.PromptTokens
+			rec.CompletionTokens = resp.Usage.CompletionTokens
+		}
+		if cost, cerr := llmbridge.CompletionCost(resp); cerr == nil {
+			rec.CostUSD = cost
+		}
+		_ = persistence.RecordUsage(s.usageDB, rec)
+	}
+
 	// Track token usage for rate limiting and Prometheus metrics.
 	if resp.Usage != nil {
 		if apiKey != "" {
@@ -1348,6 +1379,37 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"active_keys":    len(s.keyStore.ListKeys()),
 		"orgs_count":     len(s.orgStore.ListOrgs()),
 	})
+}
+
+func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
+	if s.usageDB == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"note":    "usage analytics requires a persistent database (start with -db flag)",
+			"summary": persistence.UsageSummary{ByModel: map[string]*persistence.ModelUsage{}},
+		})
+		return
+	}
+	q := r.URL.Query()
+	var from, to int64
+	if v := q.Get("from"); v != "" {
+		fmt.Sscanf(v, "%d", &from) //nolint:errcheck
+	}
+	if v := q.Get("to"); v != "" {
+		fmt.Sscanf(v, "%d", &to) //nolint:errcheck
+	}
+	f := persistence.UsageFilter{
+		Key:    q.Get("key"),
+		OrgID:  q.Get("org_id"),
+		TeamID: q.Get("team_id"),
+		From:   from,
+		To:     to,
+	}
+	summary, err := persistence.QueryUsage(s.usageDB, f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"summary": summary})
 }
 
 // ---- Webhook helpers ----

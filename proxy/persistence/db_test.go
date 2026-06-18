@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"testing"
+	"time"
 )
 
 func TestOpenMemory(t *testing.T) {
@@ -67,6 +68,102 @@ func TestAPIKeyRoundTrip(t *testing.T) {
 	}
 	if currentSpend != 2.5 {
 		t.Errorf("current_spend = %f", currentSpend)
+	}
+}
+
+func TestUsageRecordsTableExists(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	var name string
+	err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='usage_records'`).Scan(&name)
+	if err != nil {
+		t.Fatalf("usage_records table not found: %v", err)
+	}
+}
+
+func TestRecordAndQueryUsage(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	records := []UsageRecord{
+		{ID: "r1", Key: "k1", OrgID: "org1", TeamID: "t1", Model: "gpt-4o", Provider: "openai", PromptTokens: 100, CompletionTokens: 50, CostUSD: 0.01, Timestamp: now},
+		{ID: "r2", Key: "k1", OrgID: "org1", TeamID: "t1", Model: "gpt-4o", Provider: "openai", PromptTokens: 200, CompletionTokens: 80, CostUSD: 0.02, Timestamp: now},
+		{ID: "r3", Key: "k2", OrgID: "org2", TeamID: "t2", Model: "claude-sonnet-4-6", Provider: "anthropic", PromptTokens: 150, CompletionTokens: 60, CostUSD: 0.015, Timestamp: now},
+	}
+	for _, rec := range records {
+		if err := RecordUsage(db, rec); err != nil {
+			t.Fatalf("RecordUsage: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name             string
+		filter           UsageFilter
+		wantRequests     int
+		wantPromptTokens int
+	}{
+		{"all records", UsageFilter{}, 3, 450},
+		{"filter by key k1", UsageFilter{Key: "k1"}, 2, 300},
+		{"filter by key k2", UsageFilter{Key: "k2"}, 1, 150},
+		{"filter by org1", UsageFilter{OrgID: "org1"}, 2, 300},
+		{"filter by team2", UsageFilter{TeamID: "t2"}, 1, 150},
+		{"time range includes all", UsageFilter{From: now.Unix() - 1, To: now.Unix() + 1}, 3, 450},
+		{"time range excludes all", UsageFilter{From: now.Unix() + 100}, 0, 0},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			summary, err := QueryUsage(db, c.filter)
+			if err != nil {
+				t.Fatalf("QueryUsage: %v", err)
+			}
+			if summary.TotalRequests != c.wantRequests {
+				t.Errorf("TotalRequests = %d, want %d", summary.TotalRequests, c.wantRequests)
+			}
+			if summary.TotalPromptTokens != c.wantPromptTokens {
+				t.Errorf("TotalPromptTokens = %d, want %d", summary.TotalPromptTokens, c.wantPromptTokens)
+			}
+		})
+	}
+}
+
+func TestQueryUsageByModel(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	recs := []UsageRecord{
+		{ID: "a", Model: "gpt-4o", Provider: "openai", PromptTokens: 10, CompletionTokens: 5, CostUSD: 0.001, Timestamp: now},
+		{ID: "b", Model: "gpt-4o", Provider: "openai", PromptTokens: 20, CompletionTokens: 10, CostUSD: 0.002, Timestamp: now},
+		{ID: "c", Model: "gpt-4o-mini", Provider: "openai", PromptTokens: 5, CompletionTokens: 2, CostUSD: 0.0001, Timestamp: now},
+	}
+	for _, r := range recs {
+		_ = RecordUsage(db, r)
+	}
+
+	summary, err := QueryUsage(db, UsageFilter{})
+	if err != nil {
+		t.Fatalf("QueryUsage: %v", err)
+	}
+	if _, ok := summary.ByModel["gpt-4o"]; !ok {
+		t.Error("expected gpt-4o in ByModel")
+	}
+	if summary.ByModel["gpt-4o"].Requests != 2 {
+		t.Errorf("gpt-4o requests = %d, want 2", summary.ByModel["gpt-4o"].Requests)
+	}
+	if _, ok := summary.ByModel["gpt-4o-mini"]; !ok {
+		t.Error("expected gpt-4o-mini in ByModel")
 	}
 }
 
