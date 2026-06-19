@@ -275,6 +275,44 @@ func LangfuseHandler(publicKey, secretKey, baseURL string, client *http.Client) 
 	}
 }
 
+// VerboseLogHandler returns a Handler that writes full request and response
+// bodies as JSON lines to w. Each line carries: time, event, key (from
+// Metadata["key"]), and the complete request or response body.
+// Intended for debugging and compliance audit trails — never written to stdout.
+func VerboseLogHandler(w io.Writer) Handler {
+	return func(_ context.Context, event Event) {
+		rec := map[string]interface{}{
+			"time":  time.Now().UTC().Format(time.RFC3339Nano),
+			"event": string(event.Type),
+		}
+		if k := event.Metadata["key"]; k != "" {
+			rec["key"] = k
+		}
+		if event.Provider != "" {
+			rec["provider"] = event.Provider
+		}
+		if event.Model != "" {
+			rec["model"] = event.Model
+		}
+		switch event.Type {
+		case EventRequest:
+			if event.Request != nil {
+				rec["request"] = event.Request
+			}
+		case EventResponse:
+			if event.Response != nil {
+				rec["response"] = event.Response
+			}
+		case EventError:
+			if event.Error != nil {
+				rec["error"] = event.Error.Error()
+			}
+		}
+		b, _ := json.Marshal(rec)
+		_, _ = fmt.Fprintf(w, "%s\n", b)
+	}
+}
+
 func totalTokens(resp *types.Response) int {
 	if resp == nil || resp.Usage == nil {
 		return 0

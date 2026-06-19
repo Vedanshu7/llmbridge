@@ -93,6 +93,8 @@ type Server struct {
 	oidcStates    *auth.OIDCStateStore
 
 	usageDB *sql.DB // non-nil when backed by SQLite; used for usage_records writes
+
+	verboseLogger callbacks.Handler // nil = disabled; writes full req/resp JSON to file
 }
 
 // NewServer constructs a Server backed by the given LLM provider.
@@ -244,6 +246,13 @@ func fromConfig(cfg *config.Config, provider base.LLM, dbPath string) (*Server, 
 		s.aliases = cfg.Aliases
 	}
 	s.logFile = cfg.LogFile
+
+	// Wire verbose request/response logger from config.
+	if cfg.VerboseLogging && cfg.VerboseLogFile != "" {
+		if vf, err := os.OpenFile(cfg.VerboseLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			s.verboseLogger = callbacks.VerboseLogHandler(vf)
+		}
+	}
 
 	// Wire OIDC/SSO from config.
 	if cfg.OIDC != nil {
@@ -778,6 +787,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fire verbose request event before dispatching.
+	if s.verboseLogger != nil {
+		s.verboseLogger(ctx, callbacks.Event{
+			Type:     callbacks.EventRequest,
+			Provider: "",
+			Model:    req.Model,
+			Request:  &req,
+			Metadata: map[string]string{"key": apiKey},
+		})
+	}
+
 	if oaiReq.Stream {
 		s.streamChatCompletion(w, r, ctx, req, handlerStart)
 		return
@@ -799,8 +819,27 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.provider.Complete(ctx, req)
 	if err != nil {
+		if s.verboseLogger != nil {
+			s.verboseLogger(ctx, callbacks.Event{
+				Type:     callbacks.EventError,
+				Model:    req.Model,
+				Request:  &req,
+				Error:    err,
+				Metadata: map[string]string{"key": apiKey},
+			})
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
+	}
+	if s.verboseLogger != nil {
+		s.verboseLogger(ctx, callbacks.Event{
+			Type:     callbacks.EventResponse,
+			Provider: resp.Provider,
+			Model:    resp.Model,
+			Request:  &req,
+			Response: resp,
+			Metadata: map[string]string{"key": apiKey},
+		})
 	}
 
 	// Guardrails — check response before sending to client.

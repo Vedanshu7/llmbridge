@@ -236,6 +236,71 @@ func TestLangfuseHandlerNilUsage(t *testing.T) {
 	}
 }
 
+// ---- VerboseLogHandler ----
+
+func TestVerboseLogHandlerRequest(t *testing.T) {
+	var buf bytes.Buffer
+	h := VerboseLogHandler(&buf)
+	h(context.Background(), Event{
+		Type:    EventRequest,
+		Model:   "gpt-4o",
+		Request: &types.Request{Messages: []types.Message{{Role: "user", Content: "hello"}}},
+		Metadata: map[string]string{"key": "llmb-abc"},
+	})
+	var rec map[string]interface{}
+	if err := json.NewDecoder(&buf).Decode(&rec); err != nil {
+		t.Fatalf("invalid JSON: %v — raw: %s", err, buf.String())
+	}
+	if rec["event"] != string(EventRequest) {
+		t.Errorf("event = %v, want %q", rec["event"], EventRequest)
+	}
+	if rec["key"] != "llmb-abc" {
+		t.Errorf("key = %v, want llmb-abc", rec["key"])
+	}
+	if rec["request"] == nil {
+		t.Error("expected request field in verbose log")
+	}
+}
+
+func TestVerboseLogHandlerResponse(t *testing.T) {
+	var buf bytes.Buffer
+	h := VerboseLogHandler(&buf)
+	h(context.Background(), Event{
+		Type:     EventResponse,
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Response: &types.Response{Content: "world"},
+		Metadata: map[string]string{"key": "llmb-xyz"},
+	})
+	var rec map[string]interface{}
+	if err := json.NewDecoder(&buf).Decode(&rec); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if rec["event"] != string(EventResponse) {
+		t.Errorf("event = %v", rec["event"])
+	}
+	if rec["response"] == nil {
+		t.Error("expected response field")
+	}
+}
+
+func TestVerboseLogHandlerError(t *testing.T) {
+	var buf bytes.Buffer
+	h := VerboseLogHandler(&buf)
+	h(context.Background(), Event{
+		Type:  EventError,
+		Model: "gpt-4o",
+		Error: context.DeadlineExceeded,
+	})
+	var rec map[string]interface{}
+	if err := json.NewDecoder(&buf).Decode(&rec); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if rec["error"] == nil {
+		t.Error("expected error field in verbose log")
+	}
+}
+
 // ---- Instrument / InstrumentedProvider ----
 
 type stubLLM struct {

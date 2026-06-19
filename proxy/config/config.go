@@ -48,6 +48,14 @@ type Config struct {
 	// Leave empty to disable access logging.
 	LogFile string `json:"log_file,omitempty"`
 
+	// VerboseLogging enables full request and response body logging.
+	// When true, VerboseLogFile must also be set.
+	VerboseLogging bool `json:"verbose_logging,omitempty"`
+
+	// VerboseLogFile is the path for the verbose request/response log.
+	// Each line is a JSON object with time, event, key, and the full body.
+	VerboseLogFile string `json:"verbose_log_file,omitempty"`
+
 	// CacheTTLSeconds is the default cache TTL in seconds (default: 300).
 	// Set to -1 to disable caching entirely.
 	CacheTTLSeconds int `json:"cache_ttl_seconds,omitempty"`
