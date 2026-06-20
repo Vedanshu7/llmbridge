@@ -8,6 +8,7 @@ import (
 	bedrockCost "github.com/Vedanshu7/llmbridge/llms/bedrock"
 	cohereCost "github.com/Vedanshu7/llmbridge/llms/cohere"
 	geminiCost "github.com/Vedanshu7/llmbridge/llms/gemini"
+	mistralCost "github.com/Vedanshu7/llmbridge/llms/mistral"
 	openaiCost "github.com/Vedanshu7/llmbridge/llms/openai"
 	"github.com/Vedanshu7/llmbridge/types"
 )
@@ -32,6 +33,8 @@ func CompletionCost(resp *types.Response) (float64, error) {
 		return cohereCost.CostForResponse(resp)
 	case "bedrock":
 		return bedrockCost.CostForResponse(resp)
+	case "mistral":
+		return mistralCost.CostForResponse(resp)
 	default:
 		// For OpenAI-compatible providers (groq, together, deepseek, etc.)
 		// fall back to the model info DB if available.
