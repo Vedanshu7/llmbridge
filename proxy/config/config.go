@@ -73,6 +73,15 @@ type Config struct {
 
 	// OIDC configures SSO/OIDC authentication for the admin UI.
 	OIDC *OIDCConfig `json:"oidc,omitempty"`
+
+	// OTELEndpoint is the base URL of an OpenTelemetry collector OTLP/HTTP endpoint.
+	// When set, a span is emitted for every completion request.
+	// Example: "http://localhost:4318"
+	OTELEndpoint string `json:"otel_endpoint,omitempty"`
+
+	// OTELServiceName is the service.name attribute written into every span.
+	// Defaults to "llmbridge" when empty.
+	OTELServiceName string `json:"otel_service_name,omitempty"`
 }
 
 // SecretConfig specifies an external secret backend.

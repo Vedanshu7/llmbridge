@@ -95,6 +95,8 @@ type Server struct {
 	usageDB *sql.DB // non-nil when backed by SQLite; used for usage_records writes
 
 	verboseLogger callbacks.Handler // nil = disabled; writes full req/resp JSON to file
+
+	otelMgr *callbacks.Manager // nil = disabled; emits OTLP spans to a collector
 }
 
 // NewServer constructs a Server backed by the given LLM provider.
@@ -252,6 +254,16 @@ func fromConfig(cfg *config.Config, provider base.LLM, dbPath string) (*Server, 
 		if vf, err := os.OpenFile(cfg.VerboseLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 			s.verboseLogger = callbacks.VerboseLogHandler(vf)
 		}
+	}
+
+	// Wire OTEL span exporter from config.
+	if cfg.OTELEndpoint != "" {
+		svcName := cfg.OTELServiceName
+		if svcName == "" {
+			svcName = "llmbridge"
+		}
+		s.otelMgr = callbacks.NewManager()
+		s.otelMgr.Register(callbacks.OTELHandler(cfg.OTELEndpoint, svcName, nil))
 	}
 
 	// Wire OIDC/SSO from config.
@@ -787,7 +799,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fire verbose request event before dispatching.
+	// Fire verbose and OTEL request events before dispatching.
 	if s.verboseLogger != nil {
 		s.verboseLogger(ctx, callbacks.Event{
 			Type:     callbacks.EventRequest,
@@ -795,6 +807,13 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			Model:    req.Model,
 			Request:  &req,
 			Metadata: map[string]string{"key": apiKey},
+		})
+	}
+	if s.otelMgr != nil {
+		s.otelMgr.Fire(ctx, callbacks.Event{
+			Type:    callbacks.EventRequest,
+			Model:   req.Model,
+			Request: &req,
 		})
 	}
 
@@ -828,6 +847,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 				Metadata: map[string]string{"key": apiKey},
 			})
 		}
+		if s.otelMgr != nil {
+			s.otelMgr.Fire(ctx, callbacks.Event{
+				Type:    callbacks.EventError,
+				Model:   req.Model,
+				Request: &req,
+				Error:   err,
+			})
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
@@ -839,6 +866,15 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			Request:  &req,
 			Response: resp,
 			Metadata: map[string]string{"key": apiKey},
+		})
+	}
+	if s.otelMgr != nil {
+		s.otelMgr.Fire(ctx, callbacks.Event{
+			Type:     callbacks.EventResponse,
+			Provider: resp.Provider,
+			Model:    resp.Model,
+			Request:  &req,
+			Response: resp,
 		})
 	}
 
