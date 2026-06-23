@@ -45,6 +45,8 @@ func Migrate(db *sql.DB) error {
 		)`,
 		// Migration for existing databases that predate the name column.
 		`ALTER TABLE api_keys ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		// Migration for per-key model aliases.
+		`ALTER TABLE api_keys ADD COLUMN model_aliases TEXT NOT NULL DEFAULT '{}'`,
 		`CREATE TABLE IF NOT EXISTS orgs (
 			id            TEXT PRIMARY KEY,
 			name          TEXT    NOT NULL,

@@ -688,13 +688,6 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve model alias if configured.
-	if s.aliases != nil {
-		if canonical, ok := s.aliases[oaiReq.Model]; ok {
-			oaiReq.Model = canonical
-		}
-	}
-
 	// Translate to types.Request.
 	req := types.Request{
 		Model:       oaiReq.Model,
@@ -760,6 +753,16 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	// Resolve model alias: per-key aliases take precedence over global aliases.
+	apiKeyForAlias := auth.APIKeyFromContext(ctx)
+	if keyInfo, ok := s.keyStore.ValidateAPIKey(apiKeyForAlias); ok {
+		req.Model = keyInfo.ResolveModel(req.Model, s.aliases)
+	} else if s.aliases != nil {
+		if canonical, ok := s.aliases[req.Model]; ok {
+			req.Model = canonical
+		}
+	}
 
 	// Pre-request budget enforcement.
 	apiKey := auth.APIKeyFromContext(ctx)

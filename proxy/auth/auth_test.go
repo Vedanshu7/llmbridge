@@ -492,3 +492,62 @@ func TestCheckRouteAuthInvalidKey(t *testing.T) {
 		t.Error("expected false for invalid key")
 	}
 }
+
+// ---- ResolveModel / per-key model alias overrides ----
+
+func TestResolveModelPerKeyWinsOverGlobal(t *testing.T) {
+	key := &KeyInfo{
+		ModelAliases: map[string]string{"gpt-4": "my-fine-tune"},
+	}
+	global := map[string]string{"gpt-4": "gpt-4-turbo"}
+
+	got := key.ResolveModel("gpt-4", global)
+	if got != "my-fine-tune" {
+		t.Errorf("expected my-fine-tune, got %q", got)
+	}
+}
+
+func TestResolveModelGlobalFallback(t *testing.T) {
+	key := &KeyInfo{ModelAliases: map[string]string{}}
+	global := map[string]string{"fast": "gpt-4o-mini"}
+
+	got := key.ResolveModel("fast", global)
+	if got != "gpt-4o-mini" {
+		t.Errorf("expected gpt-4o-mini, got %q", got)
+	}
+}
+
+func TestResolveModelIdentityWhenNoAlias(t *testing.T) {
+	key := &KeyInfo{ModelAliases: map[string]string{}}
+	global := map[string]string{}
+
+	got := key.ResolveModel("claude-3", global)
+	if got != "claude-3" {
+		t.Errorf("expected claude-3 (identity), got %q", got)
+	}
+}
+
+func TestResolveModelNilKey(t *testing.T) {
+	var key *KeyInfo
+	global := map[string]string{"fast": "gpt-4o-mini"}
+
+	got := key.ResolveModel("fast", global)
+	if got != "gpt-4o-mini" {
+		t.Errorf("nil key should fall through to global, got %q", got)
+	}
+}
+
+func TestSetModelAliasesPersistInMemory(t *testing.T) {
+	store := NewAPIKeyStore()
+	k, _ := store.GenerateAPIKey([]string{"completion"})
+
+	store.SetModelAliases(k, map[string]string{"gpt-4": "my-model"})
+
+	info, ok := store.ValidateAPIKey(k)
+	if !ok {
+		t.Fatal("key not found")
+	}
+	if info.ModelAliases["gpt-4"] != "my-model" {
+		t.Errorf("expected my-model, got %q", info.ModelAliases["gpt-4"])
+	}
+}

@@ -28,16 +28,18 @@ func NewKeyManagementWithRateLimiter(store *auth.APIKeyStore, rl *auth.RateLimit
 
 // HandleGenerate handles POST /admin/key/generate.
 // Optional JSON fields: "scopes" ([]string), "ttl_seconds" (int), "spend_limit" (float64),
-// "org_id" (string), "team_id" (string), "rpm" (int), "tpm" (int).
+// "org_id" (string), "team_id" (string), "rpm" (int), "tpm" (int),
+// "model_aliases" (map[string]string).
 func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Scopes     []string `json:"scopes"`
-		TTLSeconds int      `json:"ttl_seconds"`
-		SpendLimit float64  `json:"spend_limit"`
-		OrgID      string   `json:"org_id"`
-		TeamID     string   `json:"team_id"`
-		RPM        int      `json:"rpm"` // requests per minute; 0 = unlimited
-		TPM        int      `json:"tpm"` // tokens per minute; 0 = unlimited
+		Scopes       []string          `json:"scopes"`
+		TTLSeconds   int               `json:"ttl_seconds"`
+		SpendLimit   float64           `json:"spend_limit"`
+		OrgID        string            `json:"org_id"`
+		TeamID       string            `json:"team_id"`
+		RPM          int               `json:"rpm"` // requests per minute; 0 = unlimited
+		TPM          int               `json:"tpm"` // tokens per minute; 0 = unlimited
+		ModelAliases map[string]string `json:"model_aliases"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Scopes) == 0 {
 		body.Scopes = []string{"completion"}
@@ -64,6 +66,9 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 			RequestsPerMin: body.RPM,
 			TokensPerMin:   body.TPM,
 		})
+	}
+	if len(body.ModelAliases) > 0 {
+		km.store.SetModelAliases(key, body.ModelAliases)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }

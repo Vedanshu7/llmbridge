@@ -24,6 +24,23 @@ type KeyInfo struct {
 	AllowedCIDRs []string  `json:"allowed_cidrs,omitempty"`
 	OrgID        string    `json:"org_id,omitempty"`
 	TeamID       string    `json:"team_id,omitempty"`
+	// ModelAliases maps model names to backend model names for this specific key.
+	// Resolution order: per-key alias → global alias → identity.
+	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+}
+
+// ResolveModel returns the canonical model name for model using the key's own
+// alias table, then the global alias table, and finally the name itself.
+func (k *KeyInfo) ResolveModel(model string, globalAliases map[string]string) string {
+	if k != nil {
+		if resolved, ok := k.ModelAliases[model]; ok {
+			return resolved
+		}
+	}
+	if resolved, ok := globalAliases[model]; ok {
+		return resolved
+	}
+	return model
 }
 
 // APIKeyStore is a thread-safe store of API keys backed by an optional SQLite database.
@@ -51,22 +68,53 @@ func NewAPIKeyStoreWithDB(db *sql.DB) (*APIKeyStore, error) {
 
 func (s *APIKeyStore) loadFromDB() error {
 	rows, err := s.db.Query(
-		`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id FROM api_keys`,
+		`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases FROM api_keys`,
 	)
 	if err != nil {
-		return fmt.Errorf("auth: load keys: %w", err)
+		// Fallback for databases that predate the model_aliases column.
+		rows, err = s.db.Query(
+			`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id FROM api_keys`,
+		)
+		if err != nil {
+			return fmt.Errorf("auth: load keys: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				info                           KeyInfo
+				createdAt, lastUsed, expiresAt int64
+				scopesJSON, cidrsJSON          string
+			)
+			if err := rows.Scan(
+				&info.Key, &info.Name, &createdAt, &lastUsed, &expiresAt,
+				&scopesJSON, &info.SpendLimit, &info.CurrentSpend,
+				&cidrsJSON, &info.OrgID, &info.TeamID,
+			); err != nil {
+				return fmt.Errorf("auth: scan key: %w", err)
+			}
+			info.CreatedAt = time.Unix(createdAt, 0)
+			info.LastUsed = time.Unix(lastUsed, 0)
+			if expiresAt > 0 {
+				info.ExpiresAt = time.Unix(expiresAt, 0)
+			}
+			_ = json.Unmarshal([]byte(scopesJSON), &info.Scopes)
+			_ = json.Unmarshal([]byte(cidrsJSON), &info.AllowedCIDRs)
+			s.keys[info.Key] = &info
+		}
+		return rows.Err()
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var (
-			info                            KeyInfo
+			info                           KeyInfo
 			createdAt, lastUsed, expiresAt int64
-			scopesJSON, cidrsJSON           string
+			scopesJSON, cidrsJSON          string
+			aliasesJSON                    string
 		)
 		if err := rows.Scan(
 			&info.Key, &info.Name, &createdAt, &lastUsed, &expiresAt,
 			&scopesJSON, &info.SpendLimit, &info.CurrentSpend,
-			&cidrsJSON, &info.OrgID, &info.TeamID,
+			&cidrsJSON, &info.OrgID, &info.TeamID, &aliasesJSON,
 		); err != nil {
 			return fmt.Errorf("auth: scan key: %w", err)
 		}
@@ -77,6 +125,7 @@ func (s *APIKeyStore) loadFromDB() error {
 		}
 		_ = json.Unmarshal([]byte(scopesJSON), &info.Scopes)
 		_ = json.Unmarshal([]byte(cidrsJSON), &info.AllowedCIDRs)
+		_ = json.Unmarshal([]byte(aliasesJSON), &info.ModelAliases)
 		s.keys[info.Key] = &info
 	}
 	return rows.Err()
@@ -88,17 +137,18 @@ func (s *APIKeyStore) persistKey(info *KeyInfo) {
 	}
 	scopesJSON, _ := json.Marshal(info.Scopes)
 	cidrsJSON, _ := json.Marshal(info.AllowedCIDRs)
+	aliasesJSON, _ := json.Marshal(info.ModelAliases)
 	expiresAt := int64(0)
 	if !info.ExpiresAt.IsZero() {
 		expiresAt = info.ExpiresAt.Unix()
 	}
 	_, _ = s.db.Exec(
 		`INSERT OR REPLACE INTO api_keys
-		 (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		 (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		info.Key, info.Name, info.CreatedAt.Unix(), info.LastUsed.Unix(), expiresAt,
 		string(scopesJSON), info.SpendLimit, info.CurrentSpend,
-		string(cidrsJSON), info.OrgID, info.TeamID,
+		string(cidrsJSON), info.OrgID, info.TeamID, string(aliasesJSON),
 	)
 }
 
@@ -204,6 +254,18 @@ func (s *APIKeyStore) SetAllowedIPs(key string, cidrs []string) {
 	s.mu.Lock()
 	if info, ok := s.keys[key]; ok {
 		info.AllowedCIDRs = cidrs
+		s.persistKey(info)
+	}
+	s.mu.Unlock()
+}
+
+// SetModelAliases sets per-key model alias overrides.
+// Aliases are resolved before global aliases: if a key has "gpt-4" → "my-deploy",
+// requests from this key for "gpt-4" will be routed to "my-deploy".
+func (s *APIKeyStore) SetModelAliases(key string, aliases map[string]string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.ModelAliases = aliases
 		s.persistKey(info)
 	}
 	s.mu.Unlock()
