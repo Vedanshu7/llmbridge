@@ -40,6 +40,7 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 		RPM          int               `json:"rpm"` // requests per minute; 0 = unlimited
 		TPM          int               `json:"tpm"` // tokens per minute; 0 = unlimited
 		ModelAliases map[string]string `json:"model_aliases"`
+		ResetPeriod  string            `json:"reset_period"` // "daily", "weekly", "monthly"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Scopes) == 0 {
 		body.Scopes = []string{"completion"}
@@ -69,6 +70,9 @@ func (km *KeyManagement) HandleGenerate(w http.ResponseWriter, r *http.Request) 
 	}
 	if len(body.ModelAliases) > 0 {
 		km.store.SetModelAliases(key, body.ModelAliases)
+	}
+	if body.ResetPeriod != "" {
+		km.store.SetResetPeriod(key, body.ResetPeriod)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }

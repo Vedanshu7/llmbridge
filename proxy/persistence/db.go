@@ -45,8 +45,6 @@ func Migrate(db *sql.DB) error {
 		)`,
 		// Migration for existing databases that predate the name column.
 		`ALTER TABLE api_keys ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
-		// Migration for per-key model aliases.
-		`ALTER TABLE api_keys ADD COLUMN model_aliases TEXT NOT NULL DEFAULT '{}'`,
 		`CREATE TABLE IF NOT EXISTS orgs (
 			id            TEXT PRIMARY KEY,
 			name          TEXT    NOT NULL,
@@ -62,6 +60,15 @@ func Migrate(db *sql.DB) error {
 			budget        REAL    NOT NULL DEFAULT 0,
 			current_spend REAL    NOT NULL DEFAULT 0
 		)`,
+		// Migration for per-key model aliases.
+		`ALTER TABLE api_keys ADD COLUMN model_aliases TEXT NOT NULL DEFAULT '{}'`,
+		// Migration for budget reset periods.
+		`ALTER TABLE api_keys ADD COLUMN reset_period TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE api_keys ADD COLUMN last_reset INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE orgs ADD COLUMN reset_period TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE orgs ADD COLUMN last_reset INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE teams ADD COLUMN reset_period TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE teams ADD COLUMN last_reset INTEGER NOT NULL DEFAULT 0`,
 		`CREATE TABLE IF NOT EXISTS usage_records (
 			id                TEXT    PRIMARY KEY,
 			key               TEXT    NOT NULL DEFAULT '',
@@ -89,6 +96,73 @@ func Migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// ---- Budget reset helpers ----
+
+// ZeroSpend resets current_spend to 0 and updates last_reset to now for the
+// given row in table (one of "api_keys", "orgs", "teams") identified by id.
+func ZeroSpend(db *sql.DB, table, id string) error {
+	now := time.Now().Unix()
+	var query string
+	switch table {
+	case "api_keys":
+		query = `UPDATE api_keys SET current_spend = 0, last_reset = ? WHERE key = ?`
+	case "orgs":
+		query = `UPDATE orgs SET current_spend = 0, last_reset = ? WHERE id = ?`
+	case "teams":
+		query = `UPDATE teams SET current_spend = 0, last_reset = ? WHERE id = ?`
+	default:
+		return fmt.Errorf("persistence: ZeroSpend: unknown table %q", table)
+	}
+	if _, err := db.Exec(query, now, id); err != nil {
+		return fmt.Errorf("persistence: ZeroSpend: %w", err)
+	}
+	return nil
+}
+
+// ResetCandidate is a row that may need its spend budget reset.
+type ResetCandidate struct {
+	ID          string
+	ResetPeriod string
+	LastReset   time.Time
+}
+
+// QueryResetCandidates returns all rows from table that have a non-empty reset_period.
+func QueryResetCandidates(db *sql.DB, table string) ([]ResetCandidate, error) {
+	var idCol, query string
+	switch table {
+	case "api_keys":
+		idCol = "key"
+		query = `SELECT key, reset_period, last_reset FROM api_keys WHERE reset_period != ''`
+	case "orgs":
+		idCol = "id"
+		query = `SELECT id, reset_period, last_reset FROM orgs WHERE reset_period != ''`
+	case "teams":
+		idCol = "id"
+		query = `SELECT id, reset_period, last_reset FROM teams WHERE reset_period != ''`
+	default:
+		return nil, fmt.Errorf("persistence: QueryResetCandidates: unknown table %q", table)
+	}
+	_ = idCol
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("persistence: QueryResetCandidates: %w", err)
+	}
+	defer rows.Close()
+	var out []ResetCandidate
+	for rows.Next() {
+		var c ResetCandidate
+		var lastReset int64
+		if err := rows.Scan(&c.ID, &c.ResetPeriod, &lastReset); err != nil {
+			return nil, fmt.Errorf("persistence: QueryResetCandidates scan: %w", err)
+		}
+		if lastReset > 0 {
+			c.LastReset = time.Unix(lastReset, 0)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // UsageRecord is a single completed-request entry written to usage_records.

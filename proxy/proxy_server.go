@@ -351,6 +351,11 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		handler = middleware.RequestLogger(f)(handler)
 	}
 
+	// Start background budget-reset ticker when the server has a database.
+	if s.usageDB != nil {
+		go s.runBudgetResets(ctx)
+	}
+
 	srv := &http.Server{Handler: handler}
 	go func() {
 		<-ctx.Done()
@@ -1601,6 +1606,46 @@ func (s *Server) oidcUpsertKey(user *auth.OIDCUser) (string, error) {
 }
 
 // ---- Helpers ----
+
+// runBudgetResets checks all keys/orgs/teams for elapsed reset periods and
+// zeros their current_spend accordingly. It runs once at startup and then
+// every hour while the server is live.
+func (s *Server) runBudgetResets(ctx context.Context) {
+	s.applyBudgetResets()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.applyBudgetResets()
+		}
+	}
+}
+
+func (s *Server) applyBudgetResets() {
+	candidates, err := persistence.QueryResetCandidates(s.usageDB, "api_keys")
+	if err == nil {
+		for _, c := range candidates {
+			if auth.IsPeriodElapsed(c.ResetPeriod, c.LastReset) {
+				s.keyStore.ZeroKeySpend(c.ID)
+				_ = persistence.ZeroSpend(s.usageDB, "api_keys", c.ID)
+			}
+		}
+	}
+	for _, table := range []string{"orgs", "teams"} {
+		candidates, err := persistence.QueryResetCandidates(s.usageDB, table)
+		if err != nil {
+			continue
+		}
+		for _, c := range candidates {
+			if auth.IsPeriodElapsed(c.ResetPeriod, c.LastReset) {
+				_ = persistence.ZeroSpend(s.usageDB, table, c.ID)
+			}
+		}
+	}
+}
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

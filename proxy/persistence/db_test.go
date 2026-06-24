@@ -195,3 +195,64 @@ func TestOrgTeamRoundTrip(t *testing.T) {
 		t.Errorf("team org_id = %q", teamOrgID)
 	}
 }
+
+func TestZeroSpend(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`INSERT INTO api_keys (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset)
+		VALUES ('k1', '', 0, 0, 0, '[]', 0, 9.99, '[]', '', '', '{}', 'daily', 0)`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	if err := ZeroSpend(db, "api_keys", "k1"); err != nil {
+		t.Fatalf("ZeroSpend: %v", err)
+	}
+
+	var spend float64
+	var lastReset int64
+	db.QueryRow(`SELECT current_spend, last_reset FROM api_keys WHERE key='k1'`).Scan(&spend, &lastReset) //nolint:errcheck
+	if spend != 0 {
+		t.Errorf("expected current_spend=0, got %f", spend)
+	}
+	if lastReset == 0 {
+		t.Error("expected last_reset to be updated")
+	}
+}
+
+func TestQueryResetCandidates(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	// Insert keys with and without reset_period.
+	stmts := []string{
+		`INSERT INTO api_keys (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset) VALUES ('k1', '', 0, 0, 0, '[]', 0, 0, '[]', '', '', '{}', 'daily', 0)`,
+		`INSERT INTO api_keys (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset) VALUES ('k2', '', 0, 0, 0, '[]', 0, 0, '[]', '', '', '{}', '', 0)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	candidates, err := QueryResetCandidates(db, "api_keys")
+	if err != nil {
+		t.Fatalf("QueryResetCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].ID != "k1" {
+		t.Errorf("expected k1, got %q", candidates[0].ID)
+	}
+	if candidates[0].ResetPeriod != "daily" {
+		t.Errorf("expected daily, got %q", candidates[0].ResetPeriod)
+	}
+}

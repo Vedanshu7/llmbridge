@@ -27,6 +27,29 @@ type KeyInfo struct {
 	// ModelAliases maps model names to backend model names for this specific key.
 	// Resolution order: per-key alias → global alias → identity.
 	ModelAliases map[string]string `json:"model_aliases,omitempty"`
+	// ResetPeriod controls when current_spend is automatically reset to zero.
+	// Valid values: "daily", "weekly", "monthly". Empty = no automatic reset.
+	ResetPeriod string    `json:"reset_period,omitempty"`
+	LastReset   time.Time `json:"last_reset,omitempty"`
+}
+
+// IsPeriodElapsed returns true if the given reset period has elapsed since lastReset.
+// An empty period always returns false.
+func IsPeriodElapsed(period string, lastReset time.Time) bool {
+	if period == "" || lastReset.IsZero() {
+		return false
+	}
+	now := time.Now()
+	switch period {
+	case "daily":
+		return now.Sub(lastReset) >= 24*time.Hour
+	case "weekly":
+		return now.Sub(lastReset) >= 7*24*time.Hour
+	case "monthly":
+		// Consider a month as elapsed when we've crossed into a different calendar month.
+		return now.Year() > lastReset.Year() || now.Month() > lastReset.Month()
+	}
+	return false
 }
 
 // ResolveModel returns the canonical model name for model using the key's own
@@ -67,47 +90,21 @@ func NewAPIKeyStoreWithDB(db *sql.DB) (*APIKeyStore, error) {
 }
 
 func (s *APIKeyStore) loadFromDB() error {
+	// Migrate runs before loadFromDB so all columns are guaranteed to exist.
 	rows, err := s.db.Query(
-		`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases FROM api_keys`,
+		`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend,
+		        allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset
+		 FROM api_keys`,
 	)
 	if err != nil {
-		// Fallback for databases that predate the model_aliases column.
-		rows, err = s.db.Query(
-			`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id FROM api_keys`,
-		)
-		if err != nil {
-			return fmt.Errorf("auth: load keys: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				info                           KeyInfo
-				createdAt, lastUsed, expiresAt int64
-				scopesJSON, cidrsJSON          string
-			)
-			if err := rows.Scan(
-				&info.Key, &info.Name, &createdAt, &lastUsed, &expiresAt,
-				&scopesJSON, &info.SpendLimit, &info.CurrentSpend,
-				&cidrsJSON, &info.OrgID, &info.TeamID,
-			); err != nil {
-				return fmt.Errorf("auth: scan key: %w", err)
-			}
-			info.CreatedAt = time.Unix(createdAt, 0)
-			info.LastUsed = time.Unix(lastUsed, 0)
-			if expiresAt > 0 {
-				info.ExpiresAt = time.Unix(expiresAt, 0)
-			}
-			_ = json.Unmarshal([]byte(scopesJSON), &info.Scopes)
-			_ = json.Unmarshal([]byte(cidrsJSON), &info.AllowedCIDRs)
-			s.keys[info.Key] = &info
-		}
-		return rows.Err()
+		return fmt.Errorf("auth: load keys: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var (
 			info                           KeyInfo
 			createdAt, lastUsed, expiresAt int64
+			lastReset                      int64
 			scopesJSON, cidrsJSON          string
 			aliasesJSON                    string
 		)
@@ -115,6 +112,7 @@ func (s *APIKeyStore) loadFromDB() error {
 			&info.Key, &info.Name, &createdAt, &lastUsed, &expiresAt,
 			&scopesJSON, &info.SpendLimit, &info.CurrentSpend,
 			&cidrsJSON, &info.OrgID, &info.TeamID, &aliasesJSON,
+			&info.ResetPeriod, &lastReset,
 		); err != nil {
 			return fmt.Errorf("auth: scan key: %w", err)
 		}
@@ -122,6 +120,9 @@ func (s *APIKeyStore) loadFromDB() error {
 		info.LastUsed = time.Unix(lastUsed, 0)
 		if expiresAt > 0 {
 			info.ExpiresAt = time.Unix(expiresAt, 0)
+		}
+		if lastReset > 0 {
+			info.LastReset = time.Unix(lastReset, 0)
 		}
 		_ = json.Unmarshal([]byte(scopesJSON), &info.Scopes)
 		_ = json.Unmarshal([]byte(cidrsJSON), &info.AllowedCIDRs)
@@ -142,13 +143,19 @@ func (s *APIKeyStore) persistKey(info *KeyInfo) {
 	if !info.ExpiresAt.IsZero() {
 		expiresAt = info.ExpiresAt.Unix()
 	}
+	lastReset := int64(0)
+	if !info.LastReset.IsZero() {
+		lastReset = info.LastReset.Unix()
+	}
 	_, _ = s.db.Exec(
 		`INSERT OR REPLACE INTO api_keys
-		 (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend, allowed_cidrs, org_id, team_id, model_aliases)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend,
+		  allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		info.Key, info.Name, info.CreatedAt.Unix(), info.LastUsed.Unix(), expiresAt,
 		string(scopesJSON), info.SpendLimit, info.CurrentSpend,
 		string(cidrsJSON), info.OrgID, info.TeamID, string(aliasesJSON),
+		info.ResetPeriod, lastReset,
 	)
 }
 
@@ -254,6 +261,32 @@ func (s *APIKeyStore) SetAllowedIPs(key string, cidrs []string) {
 	s.mu.Lock()
 	if info, ok := s.keys[key]; ok {
 		info.AllowedCIDRs = cidrs
+		s.persistKey(info)
+	}
+	s.mu.Unlock()
+}
+
+// SetResetPeriod configures the automatic spend-reset period for a key.
+// Valid values: "daily", "weekly", "monthly". Pass "" to disable.
+func (s *APIKeyStore) SetResetPeriod(key, period string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.ResetPeriod = period
+		if info.LastReset.IsZero() {
+			info.LastReset = time.Now()
+		}
+		s.persistKey(info)
+	}
+	s.mu.Unlock()
+}
+
+// ZeroKeySpend resets current_spend to 0 and updates LastReset for key.
+// Called by the background reset ticker when the reset period has elapsed.
+func (s *APIKeyStore) ZeroKeySpend(key string) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.CurrentSpend = 0
+		info.LastReset = time.Now()
 		s.persistKey(info)
 	}
 	s.mu.Unlock()

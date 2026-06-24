@@ -551,3 +551,80 @@ func TestSetModelAliasesPersistInMemory(t *testing.T) {
 		t.Errorf("expected my-model, got %q", info.ModelAliases["gpt-4"])
 	}
 }
+
+// ---- IsPeriodElapsed ----
+
+func TestIsPeriodElapsedDaily(t *testing.T) {
+	cases := []struct {
+		name      string
+		lastReset time.Time
+		want      bool
+	}{
+		{"just reset", time.Now().Add(-1 * time.Hour), false},
+		{"24h ago", time.Now().Add(-25 * time.Hour), true},
+		{"zero time", time.Time{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := IsPeriodElapsed("daily", c.lastReset)
+			if got != c.want {
+				t.Errorf("IsPeriodElapsed(daily, ...) = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsPeriodElapsedWeekly(t *testing.T) {
+	cases := []struct {
+		name      string
+		lastReset time.Time
+		want      bool
+	}{
+		{"5 days ago", time.Now().Add(-5 * 24 * time.Hour), false},
+		{"8 days ago", time.Now().Add(-8 * 24 * time.Hour), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := IsPeriodElapsed("weekly", c.lastReset)
+			if got != c.want {
+				t.Errorf("IsPeriodElapsed(weekly, ...) = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsPeriodElapsedMonthly(t *testing.T) {
+	now := time.Now()
+	sameMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	prevMonth := sameMonth.AddDate(0, -1, 0)
+
+	if IsPeriodElapsed("monthly", sameMonth) {
+		t.Error("same month should not be elapsed")
+	}
+	if !IsPeriodElapsed("monthly", prevMonth) {
+		t.Error("previous month should be elapsed")
+	}
+}
+
+func TestIsPeriodElapsedEmptyPeriod(t *testing.T) {
+	if IsPeriodElapsed("", time.Now().Add(-365*24*time.Hour)) {
+		t.Error("empty period should never be elapsed")
+	}
+}
+
+func TestZeroKeySpend(t *testing.T) {
+	store := NewAPIKeyStore()
+	k, _ := store.GenerateAPIKey([]string{"completion"})
+	info, _ := store.ValidateAPIKey(k)
+	info.CurrentSpend = 5.0
+
+	store.ZeroKeySpend(k)
+
+	updated, _ := store.ValidateAPIKey(k)
+	if updated.CurrentSpend != 0 {
+		t.Errorf("expected CurrentSpend=0 after reset, got %f", updated.CurrentSpend)
+	}
+	if updated.LastReset.IsZero() {
+		t.Error("expected LastReset to be set after reset")
+	}
+}
