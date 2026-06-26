@@ -10,6 +10,7 @@
 //	POST /v1/responses             — Responses API (stateless)
 //	POST /v1/embeddings            — embedding generation
 //	POST /v1/audio/speech          — text-to-speech
+//	POST /v1/images/generations    — image generation
 //	POST /admin/key/generate       — create API key     (admin scope)
 //	DELETE /admin/key/delete       — delete API key     (admin scope)
 //	GET  /admin/keys               — list API keys      (admin scope)
@@ -395,6 +396,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("POST /v1/responses", authedLimited(http.HandlerFunc(s.handleResponses)))
 	mux.Handle("POST /v1/embeddings", authedLimited(http.HandlerFunc(s.handleEmbeddings)))
 	mux.Handle("POST /v1/audio/speech", authedLimited(http.HandlerFunc(s.handleSpeech)))
+	mux.Handle("POST /v1/images/generations", authedLimited(http.HandlerFunc(s.handleImageGenerate)))
 	mux.Handle("POST /v1/moderations", authedLimited(http.HandlerFunc(s.handleModerations)))
 	mux.Handle("POST /v1/batches", authedLimited(http.HandlerFunc(s.handleBatchCreate)))
 	mux.Handle("GET /v1/batches/{batch_id}", authed(http.HandlerFunc(s.handleBatchStatus)))
@@ -552,6 +554,53 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", ct)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp.Audio)
+}
+
+func (s *Server) handleImageGenerate(w http.ResponseWriter, r *http.Request) {
+	gen, ok := s.provider.(base.ImageGenerator)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"provider does not support image generation")
+		return
+	}
+
+	var body struct {
+		Prompt  string `json:"prompt"`
+		Model   string `json:"model"`
+		N       int    `json:"n"`
+		Size    string `json:"size"`
+		Quality string `json:"quality"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "prompt field required")
+		return
+	}
+
+	resp, err := gen.ImageGenerate(r.Context(), types.ImageRequest{
+		Prompt:  body.Prompt,
+		Model:   body.Model,
+		N:       body.N,
+		Size:    body.Size,
+		Quality: body.Quality,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	type wireImage struct {
+		URL           string `json:"url,omitempty"`
+		B64JSON       string `json:"b64_json,omitempty"`
+		RevisedPrompt string `json:"revised_prompt,omitempty"`
+	}
+	data := make([]wireImage, len(resp.Images))
+	for i, img := range resp.Images {
+		data[i] = wireImage{URL: img.URL, B64JSON: img.B64JSON, RevisedPrompt: img.RevisedPrompt}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"created": time.Now().Unix(),
+		"data":    data,
+	})
 }
 
 func (s *Server) handleModerations(w http.ResponseWriter, r *http.Request) {

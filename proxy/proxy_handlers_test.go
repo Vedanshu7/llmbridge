@@ -29,6 +29,9 @@ type fullStub struct {
 	// Stream
 	streamDeltas []string
 	streamErr    error
+	// ImageGenerate
+	imgResp *types.ImageResponse
+	imgErr  error
 }
 
 func (f *fullStub) Speech(_ context.Context, req types.SpeechRequest) (*types.SpeechResponse, error) {
@@ -43,6 +46,13 @@ func (f *fullStub) Moderate(_ context.Context, req types.ModerationRequest) (*ty
 		return nil, f.modErr
 	}
 	return f.modResp, nil
+}
+
+func (f *fullStub) ImageGenerate(_ context.Context, req types.ImageRequest) (*types.ImageResponse, error) {
+	if f.imgErr != nil {
+		return nil, f.imgErr
+	}
+	return f.imgResp, nil
 }
 
 func (f *fullStub) Stream(_ context.Context, req types.Request) (<-chan types.Delta, error) {
@@ -139,6 +149,93 @@ func TestSpeechEndpointNotSupported(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400 for unsupported speech, got %d", w.Code)
+	}
+}
+
+// ---- handleImageGenerate tests ----
+
+func TestImageGenerationsSuccess(t *testing.T) {
+	f := &fullStub{imgResp: &types.ImageResponse{
+		Images: []types.GeneratedImage{{URL: "https://example.com/img.png", RevisedPrompt: "a cat"}},
+	}}
+	f.resp = &types.Response{Content: "ok"}
+	srv, key := newFullTestServer(f)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"prompt": "a cat", "model": "dall-e-3", "n": 1, "size": "1024x1024",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("images: got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Created int64 `json:"created"`
+		Data    []struct {
+			URL           string `json:"url"`
+			RevisedPrompt string `json:"revised_prompt"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(out.Data) != 1 || out.Data[0].URL != "https://example.com/img.png" {
+		t.Errorf("unexpected data: %+v", out.Data)
+	}
+}
+
+func TestImageGenerationsMissingPrompt(t *testing.T) {
+	f := &fullStub{}
+	f.resp = &types.Response{}
+	srv, key := newFullTestServer(f)
+
+	body, _ := json.Marshal(map[string]string{"model": "dall-e-3"}) // no prompt
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for missing prompt, got %d", w.Code)
+	}
+}
+
+func TestImageGenerationsProviderError(t *testing.T) {
+	f := &fullStub{imgErr: fmt.Errorf("image service unavailable")}
+	f.resp = &types.Response{}
+	srv, key := newFullTestServer(f)
+
+	body, _ := json.Marshal(map[string]string{"prompt": "a cat", "model": "dall-e-3"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("want 500 for provider error, got %d", w.Code)
+	}
+}
+
+func TestImageGenerationsNotSupported(t *testing.T) {
+	// Plain stubProvider doesn't implement ImageGenerator.
+	p := &stubProvider{resp: &types.Response{}}
+	srv, key := newTestServer(p)
+
+	body, _ := json.Marshal(map[string]string{"prompt": "a cat", "model": "dall-e-3"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for unsupported image generation, got %d", w.Code)
 	}
 }
 
