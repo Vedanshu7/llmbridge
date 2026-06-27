@@ -3,6 +3,8 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/Vedanshu7/llmbridge/types"
 )
@@ -25,9 +27,23 @@ type ConverseMessage struct {
 
 // ConverseBlock is one content block within a message.
 type ConverseBlock struct {
-	Text      string              `json:"text,omitempty"`
-	ToolUse   *ConverseToolUse   `json:"toolUse,omitempty"`
+	Text       string              `json:"text,omitempty"`
+	Image      *ConverseImageBlock `json:"image,omitempty"`
+	ToolUse    *ConverseToolUse    `json:"toolUse,omitempty"`
 	ToolResult *ConverseToolResult `json:"toolResult,omitempty"`
+}
+
+// ConverseImageBlock is an inline image content block. The Converse API has
+// no way to fetch a remote URL itself, so images must be supplied as
+// base64-encoded bytes.
+type ConverseImageBlock struct {
+	Format string              `json:"format"` // "png", "jpeg", "gif", "webp"
+	Source ConverseImageSource `json:"source"`
+}
+
+// ConverseImageSource carries the base64-encoded image payload.
+type ConverseImageSource struct {
+	Bytes string `json:"bytes"`
 }
 
 // ConverseToolUse is a tool invocation block in an assistant message.
@@ -67,9 +83,9 @@ type ConverseTool struct {
 
 // ConverseToolSpec defines a tool's schema.
 type ConverseToolSpec struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema ConverseSchema  `json:"inputSchema"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema ConverseSchema `json:"inputSchema"`
 }
 
 // ConverseSchema wraps the JSON Schema object.
@@ -81,9 +97,9 @@ type ConverseSchema struct {
 
 // ConverseResponse is returned by the Converse API.
 type ConverseResponse struct {
-	Output      ConverseOutput  `json:"output"`
-	StopReason  string          `json:"stopReason"`
-	Usage       *ConverseUsage  `json:"usage,omitempty"`
+	Output     ConverseOutput `json:"output"`
+	StopReason string         `json:"stopReason"`
+	Usage      *ConverseUsage `json:"usage,omitempty"`
 }
 
 // ConverseOutput contains the assistant message.
@@ -100,9 +116,9 @@ type ConverseUsage struct {
 
 // ConverseStreamEvent is one event from the ConverseStream response.
 type ConverseStreamEvent struct {
-	ContentBlockDelta  *ContentBlockDelta  `json:"contentBlockDelta,omitempty"`
-	MessageStop        *MessageStop        `json:"messageStop,omitempty"`
-	Metadata           *ConverseMetadata   `json:"metadata,omitempty"`
+	ContentBlockDelta *ContentBlockDelta `json:"contentBlockDelta,omitempty"`
+	MessageStop       *MessageStop       `json:"messageStop,omitempty"`
+	Metadata          *ConverseMetadata  `json:"metadata,omitempty"`
 }
 
 // ContentBlockDelta carries a text fragment.
@@ -128,7 +144,10 @@ type ConverseMetadata struct {
 // ---- Conversion functions ----
 
 // ToConverseRequest translates a types.Request to a Bedrock ConverseRequest.
-func ToConverseRequest(req types.Request) ConverseRequest {
+// It returns an error if a message contains multimodal content that cannot
+// be represented on the Converse API (e.g. a remote image URL, since the
+// Converse API only accepts inline base64 image bytes).
+func ToConverseRequest(req types.Request) (ConverseRequest, error) {
 	cr := ConverseRequest{}
 
 	if req.System != "" {
@@ -137,7 +156,13 @@ func ToConverseRequest(req types.Request) ConverseRequest {
 
 	for _, m := range req.Messages {
 		var blocks []ConverseBlock
-		if m.Content != "" {
+		if len(m.Parts) > 0 {
+			partBlocks, err := partsToConverseBlocks(m.Parts)
+			if err != nil {
+				return ConverseRequest{}, err
+			}
+			blocks = append(blocks, partBlocks...)
+		} else if m.Content != "" {
 			blocks = append(blocks, ConverseBlock{Text: m.Content})
 		}
 		for _, tc := range m.ToolCalls {
@@ -182,7 +207,58 @@ func ToConverseRequest(req types.Request) ConverseRequest {
 		}
 		cr.ToolConfig = &ConverseToolConfig{Tools: tools}
 	}
-	return cr
+	return cr, nil
+}
+
+// partsToConverseBlocks converts multimodal ContentParts to Bedrock Converse
+// blocks. Image parts must be base64 data URIs
+// (data:image/<format>;base64,<data>) since the Converse API has no way to
+// fetch a remote URL itself.
+func partsToConverseBlocks(parts []types.ContentPart) ([]ConverseBlock, error) {
+	out := make([]ConverseBlock, 0, len(parts))
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			out = append(out, ConverseBlock{Text: p.Text})
+		case "image_url":
+			format, data, err := parseImageDataURI(p.ImageURL)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ConverseBlock{Image: &ConverseImageBlock{
+				Format: format,
+				Source: ConverseImageSource{Bytes: data},
+			}})
+		}
+	}
+	return out, nil
+}
+
+// converseImageFormats are the image formats accepted by the Converse API.
+var converseImageFormats = map[string]string{
+	"png":  "png",
+	"jpeg": "jpeg",
+	"jpg":  "jpeg",
+	"gif":  "gif",
+	"webp": "webp",
+}
+
+// parseImageDataURI extracts the Bedrock-normalized format and base64
+// payload from a "data:image/<subtype>;base64,<data>" URI.
+func parseImageDataURI(uri string) (format, data string, err error) {
+	if !strings.HasPrefix(uri, "data:image/") {
+		return "", "", fmt.Errorf("bedrock: image content must be a base64 data URI; remote image URLs are not supported by the Converse API")
+	}
+	rest := strings.TrimPrefix(uri, "data:image/")
+	subtype, tail, ok := strings.Cut(rest, ";base64,")
+	if !ok {
+		return "", "", fmt.Errorf("bedrock: image data URI must be base64-encoded (data:image/<format>;base64,<data>)")
+	}
+	normalized, ok := converseImageFormats[strings.ToLower(subtype)]
+	if !ok {
+		return "", "", fmt.Errorf("bedrock: unsupported image format %q; must be one of png, jpeg, gif, webp", subtype)
+	}
+	return normalized, tail, nil
 }
 
 // FromConverseResponse translates a ConverseResponse to a types.Response.
