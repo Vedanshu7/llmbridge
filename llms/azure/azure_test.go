@@ -113,6 +113,109 @@ func TestChatURL(t *testing.T) {
 	}
 }
 
+func TestEmbedURLFallsBackToChatDeployment(t *testing.T) {
+	p := New("myres", "mydep", "key", "2024-02-01")
+	url := p.embedURL()
+	if !strings.Contains(url, "mydep") {
+		t.Errorf("URL missing chat deployment fallback: %s", url)
+	}
+	if !strings.Contains(url, "/embeddings") {
+		t.Errorf("URL missing /embeddings path: %s", url)
+	}
+}
+
+func TestEmbedURLUsesOverride(t *testing.T) {
+	p := New("myres", "mydep", "key", "2024-02-01")
+	p.WithEmbedDeployment("my-embed-dep")
+	url := p.embedURL()
+	if !strings.Contains(url, "my-embed-dep") {
+		t.Errorf("URL missing embed deployment override: %s", url)
+	}
+	if strings.Contains(url, "/mydep/") {
+		t.Errorf("URL should not use chat deployment when override is set: %s", url)
+	}
+}
+
+// ---- Embed ----
+
+func TestEmbedSuccess(t *testing.T) {
+	var gotPath, gotQuery string
+	_, p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"embedding": []float64{0.1, 0.2, 0.3}, "index": 0},
+			},
+		})
+	})
+
+	out, err := p.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(out) != 1 || len(out[0]) != 3 {
+		t.Fatalf("unexpected embedding output: %+v", out)
+	}
+	if out[0][1] != 0.2 {
+		t.Errorf("unexpected embedding value: %v", out[0])
+	}
+	if !strings.Contains(gotPath, "/openai/deployments/my-gpt4o/embeddings") {
+		t.Errorf("unexpected request path: %s", gotPath)
+	}
+	if !strings.Contains(gotQuery, "api-version=") {
+		t.Errorf("unexpected request query: %s", gotQuery)
+	}
+}
+
+func TestEmbedUsesEmbedDeploymentOverride(t *testing.T) {
+	var gotPath string
+	_, p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{{"embedding": []float64{0.5}, "index": 0}},
+		})
+	})
+	p.WithEmbedDeployment("text-embed-dep")
+
+	if _, err := p.Embed(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if !strings.Contains(gotPath, "/openai/deployments/text-embed-dep/embeddings") {
+		t.Errorf("expected embed deployment override in path, got %s", gotPath)
+	}
+}
+
+func TestEmbedFallsBackToChatDeployment(t *testing.T) {
+	var gotPath string
+	_, p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{{"embedding": []float64{0.5}, "index": 0}},
+		})
+	})
+
+	if _, err := p.Embed(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if !strings.Contains(gotPath, "/openai/deployments/my-gpt4o/embeddings") {
+		t.Errorf("expected chat deployment fallback in path, got %s", gotPath)
+	}
+}
+
+func TestEmbedHTTPError(t *testing.T) {
+	_, p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"bad request"}}`, http.StatusBadRequest)
+	})
+
+	if _, err := p.Embed(context.Background(), []string{"hello"}); err == nil {
+		t.Fatal("expected error for HTTP 400 response")
+	}
+}
+
 // ---- Complete ----
 
 func TestCompleteSuccess(t *testing.T) {
