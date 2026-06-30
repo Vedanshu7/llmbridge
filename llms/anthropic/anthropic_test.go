@@ -71,6 +71,71 @@ func TestCompleteUsage(t *testing.T) {
 	}
 }
 
+func TestCompleteWithThinkingSurfacesReasoning(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "thinking", "thinking": "let me work through this"},
+				{"type": "text", "text": "the answer is 42"},
+			},
+			"stop_reason": "end_turn",
+			"model":       "claude-sonnet-4-6",
+		})
+	})
+
+	resp, err := p.Complete(context.Background(), types.Request{
+		Messages:             []types.Message{{Role: "user", Content: "what is the answer?"}},
+		ThinkingBudgetTokens: 1024,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !HasReasoningContent(resp) {
+		t.Fatalf("expected reasoning content, got %q", resp.Content)
+	}
+	reasoning, answer := ExtractReasoning(resp.Content)
+	if reasoning != "let me work through this" {
+		t.Errorf("reasoning = %q, want %q", reasoning, "let me work through this")
+	}
+	if answer != "the answer is 42" {
+		t.Errorf("answer = %q, want %q", answer, "the answer is 42")
+	}
+}
+
+func TestHasReasoningContent(t *testing.T) {
+	if HasReasoningContent(&types.Response{Content: "no reasoning here"}) {
+		t.Error("expected false for content without a <think> block")
+	}
+	if !HasReasoningContent(&types.Response{Content: "<think>\nreasoning\n</think>\nanswer"}) {
+		t.Error("expected true for content with a <think> block")
+	}
+}
+
+func TestExtractReasoning(t *testing.T) {
+	cases := []struct {
+		name          string
+		content       string
+		wantReasoning string
+		wantAnswer    string
+	}{
+		{"no think block", "plain answer", "", "plain answer"},
+		{"with think block", "<think>\nsteps\n</think>\nfinal", "steps", "final"},
+		{"unterminated think block", "<think>\nsteps without close", "steps without close", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reasoning, answer := ExtractReasoning(tc.content)
+			if reasoning != tc.wantReasoning {
+				t.Errorf("reasoning = %q, want %q", reasoning, tc.wantReasoning)
+			}
+			if answer != tc.wantAnswer {
+				t.Errorf("answer = %q, want %q", answer, tc.wantAnswer)
+			}
+		})
+	}
+}
+
 func TestCompleteToolCall(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
