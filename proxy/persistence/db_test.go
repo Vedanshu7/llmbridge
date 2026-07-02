@@ -135,6 +135,82 @@ func TestRecordAndQueryUsage(t *testing.T) {
 	}
 }
 
+func TestQueryUsageRecordsReturnsRawRows(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	records := []UsageRecord{
+		{ID: "r1", Key: "k1", OrgID: "org1", TeamID: "t1", Model: "gpt-4o", Provider: "openai", PromptTokens: 100, CompletionTokens: 50, CostUSD: 0.01, Timestamp: now},
+		{ID: "r2", Key: "k1", OrgID: "org1", TeamID: "t1", Model: "gpt-4o", Provider: "openai", PromptTokens: 200, CompletionTokens: 80, CostUSD: 0.02, Timestamp: now.Add(time.Second)},
+	}
+	for _, rec := range records {
+		if err := RecordUsage(db, rec); err != nil {
+			t.Fatalf("RecordUsage: %v", err)
+		}
+	}
+
+	out, err := QueryUsageRecords(db, UsageFilter{})
+	if err != nil {
+		t.Fatalf("QueryUsageRecords: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 raw records, got %d", len(out))
+	}
+	if out[0].ID != "r1" || out[1].ID != "r2" {
+		t.Errorf("expected records ordered by timestamp ascending, got %s, %s", out[0].ID, out[1].ID)
+	}
+	if out[0].CostUSD != 0.01 {
+		t.Errorf("CostUSD = %f, want 0.01", out[0].CostUSD)
+	}
+}
+
+func TestQueryUsageRecordsFilterByOrg(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	records := []UsageRecord{
+		{ID: "r1", Key: "k1", OrgID: "org1", Model: "gpt-4o", Provider: "openai", Timestamp: now},
+		{ID: "r2", Key: "k2", OrgID: "org2", Model: "claude-sonnet-4-6", Provider: "anthropic", Timestamp: now},
+	}
+	for _, rec := range records {
+		if err := RecordUsage(db, rec); err != nil {
+			t.Fatalf("RecordUsage: %v", err)
+		}
+	}
+
+	out, err := QueryUsageRecords(db, UsageFilter{OrgID: "org1"})
+	if err != nil {
+		t.Fatalf("QueryUsageRecords: %v", err)
+	}
+	if len(out) != 1 || out[0].ID != "r1" {
+		t.Fatalf("expected only org1 record, got %+v", out)
+	}
+}
+
+func TestQueryUsageRecordsEmptyResult(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	out, err := QueryUsageRecords(db, UsageFilter{})
+	if err != nil {
+		t.Fatalf("QueryUsageRecords: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected 0 records, got %d", len(out))
+	}
+}
+
 func TestQueryUsageByModel(t *testing.T) {
 	db, err := Open(":memory:")
 	if err != nil {

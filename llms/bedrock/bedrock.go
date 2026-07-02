@@ -65,7 +65,10 @@ func (p *Provider) ValidateEnvironment() error {
 
 // Complete sends a blocking Converse request and returns the full response.
 func (p *Provider) Complete(ctx context.Context, req types.Request) (*types.Response, error) {
-	wireReq := chat.ToConverseRequest(req)
+	wireReq, err := chat.ToConverseRequest(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
 	body, err := json.Marshal(wireReq)
 	if err != nil {
 		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
@@ -80,7 +83,10 @@ func (p *Provider) Complete(ctx context.Context, req types.Request) (*types.Resp
 
 // Stream implements base.Streamer via the Bedrock ConverseStream API.
 func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.Delta, error) {
-	wireReq := chat.ToConverseRequest(req)
+	wireReq, err := chat.ToConverseRequest(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
 	body, err := json.Marshal(wireReq)
 	if err != nil {
 		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
