@@ -9,8 +9,8 @@ type CallType string
 const (
 	CallTypeCompletion      CallType = "completion"
 	CallTypeAsyncCompletion CallType = "acompletion"
-	CallTypeStreaming        CallType = "streaming"
-	CallTypeEmbedding        CallType = "embedding"
+	CallTypeStreaming       CallType = "streaming"
+	CallTypeEmbedding       CallType = "embedding"
 	CallTypeImageGeneration CallType = "image_generation"
 	CallTypeTranscription   CallType = "transcription"
 	CallTypeReranking       CallType = "reranking"
@@ -40,6 +40,12 @@ type Request struct {
 
 	// Stream signals whether the caller wants token-by-token output.
 	Stream bool
+
+	// ThinkingBudgetTokens requests extended thinking (currently supported by
+	// Anthropic Claude). 0 disables it. When set, providers that support it
+	// will surface reasoning as a <think>...</think> block prefixed to
+	// Response.Content.
+	ThinkingBudgetTokens int
 }
 
 // Response is the normalized output from any provider.
@@ -157,11 +163,11 @@ type Delta struct {
 // GenericStreamingChunk is an intermediate representation used internally
 // by provider handlers to normalise SSE payloads before emitting Deltas.
 type GenericStreamingChunk struct {
-	Text            string
-	ToolCallID      string
-	ToolName        string
-	ToolArgsDelta   string
-	IsFinished      bool
+	Text          string
+	ToolCallID    string
+	ToolName      string
+	ToolArgsDelta string
+	IsFinished    bool
 }
 
 // ModelInfo describes the capabilities and pricing of a specific model.
@@ -198,8 +204,8 @@ type CostPerToken struct {
 type ProviderSpecificModelInfo struct {
 	SupportsFunctionCalling bool
 	SupportsVision          bool
-	SupportsStreaming        bool
-	SupportsParallelFnCalls  bool
+	SupportsStreaming       bool
+	SupportsParallelFnCalls bool
 }
 
 // ProviderField describes a configuration field specific to a provider.

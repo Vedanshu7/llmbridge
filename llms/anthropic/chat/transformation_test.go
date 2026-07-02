@@ -37,7 +37,7 @@ func TestToAntRequestExplicitModel(t *testing.T) {
 
 func TestToAntRequestSystemAndTools(t *testing.T) {
 	req := types.Request{
-		System: "be helpful",
+		System:   "be helpful",
 		Messages: []types.Message{{Role: "user", Content: "hello"}},
 		Tools: []types.Tool{{
 			Name:        "weather",
@@ -63,12 +63,65 @@ func TestToAntRequestSystemAndTools(t *testing.T) {
 	}
 }
 
+func TestToAntRequestWithThinkingBudget(t *testing.T) {
+	req := types.Request{
+		Messages:             []types.Message{{Role: "user", Content: "hi"}},
+		ThinkingBudgetTokens: 2048,
+	}
+	ant := ToAntRequest(req, "m", false)
+	if ant.Thinking == nil {
+		t.Fatal("expected Thinking to be set")
+	}
+	if ant.Thinking.Type != "enabled" || ant.Thinking.BudgetTokens != 2048 {
+		t.Fatalf("unexpected thinking config: %+v", ant.Thinking)
+	}
+
+	body, err := json.Marshal(ant)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]interface{}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	thinking, ok := wire["thinking"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected thinking field in marshaled JSON: %s", body)
+	}
+	if thinking["budget_tokens"] != float64(2048) {
+		t.Fatalf("unexpected budget_tokens: %v", thinking["budget_tokens"])
+	}
+}
+
+func TestToAntRequestNoThinkingWhenBudgetZero(t *testing.T) {
+	req := types.Request{Messages: []types.Message{{Role: "user", Content: "hi"}}}
+	ant := ToAntRequest(req, "m", false)
+	if ant.Thinking != nil {
+		t.Fatalf("expected no Thinking when budget is zero, got %+v", ant.Thinking)
+	}
+}
+
+func TestFromAntResponseWithThinkingBlock(t *testing.T) {
+	r := &AntResponse{
+		Content: []AntBlock{
+			{Type: "thinking", Thinking: "step by step reasoning"},
+			{Type: "text", Text: "final answer"},
+		},
+		Model: "claude-sonnet-4-6",
+	}
+	resp := FromAntResponse(r, "anthropic")
+	want := "<think>\nstep by step reasoning\n</think>\nfinal answer"
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
 func TestFromAntResponseText(t *testing.T) {
 	r := &AntResponse{
 		Content:    []AntBlock{{Type: "text", Text: "hello world"}},
 		StopReason: "end_turn",
 		Model:      "claude-3",
-		Usage:      &struct {
+		Usage: &struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
 		}{100, 50},

@@ -127,6 +127,25 @@ func TestCompleteUsage(t *testing.T) {
 	}
 }
 
+func TestCompleteWithRemoteImageURLReturnsError(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should not reach the server for an unsupported remote image URL")
+	})
+	_, err := p.Complete(context.Background(), types.Request{
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Parts: []types.ContentPart{
+					{Type: "image_url", ImageURL: "https://example.com/cat.png"},
+				},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for remote image URL, got nil")
+	}
+}
+
 func TestCompleteHTTPError(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

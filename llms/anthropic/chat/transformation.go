@@ -16,6 +16,13 @@ type AntRequest struct {
 	Messages  []AntMessage `json:"messages"`
 	Tools     []AntTool    `json:"tools,omitempty"`
 	Stream    bool         `json:"stream,omitempty"`
+	Thinking  *AntThinking `json:"thinking,omitempty"`
+}
+
+// AntThinking requests extended thinking on the Messages API.
+type AntThinking struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // AntMessage content can be a plain string or an array of blocks.
@@ -26,7 +33,7 @@ type AntMessage struct {
 
 // AntImageSource describes the source of an image block.
 type AntImageSource struct {
-	Type      string `json:"type"`            // "url" or "base64"
+	Type      string `json:"type"` // "url" or "base64"
 	URL       string `json:"url,omitempty"`
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
@@ -40,19 +47,20 @@ type AntBlock struct {
 	Input     interface{}     `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
-	Source    *AntImageSource `json:"source,omitempty"` // for type=="image"
+	Source    *AntImageSource `json:"source,omitempty"`   // for type=="image"
+	Thinking  string          `json:"thinking,omitempty"` // for type=="thinking"
 }
 
 type AntTool struct {
-	Name        string       `json:"name"`
-	Description string       `json:"description,omitempty"`
-	InputSchema AntSchema    `json:"input_schema"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	InputSchema AntSchema `json:"input_schema"`
 }
 
 type AntSchema struct {
-	Type       string                    `json:"type"`
-	Properties map[string]AntSchemaProp  `json:"properties,omitempty"`
-	Required   []string                  `json:"required,omitempty"`
+	Type       string                   `json:"type"`
+	Properties map[string]AntSchemaProp `json:"properties,omitempty"`
+	Required   []string                 `json:"required,omitempty"`
 }
 
 type AntSchemaProp struct {
@@ -111,19 +119,28 @@ func ToAntRequest(req types.Request, defaultModel string, stream bool) AntReques
 	for _, t := range req.Tools {
 		wire.Tools = append(wire.Tools, FromTool(t))
 	}
+	if req.ThinkingBudgetTokens > 0 {
+		wire.Thinking = &AntThinking{Type: "enabled", BudgetTokens: req.ThinkingBudgetTokens}
+	}
 	return wire
 }
 
 // FromAntResponse converts an Anthropic wire response to types.Response.
+// If the response contains a "thinking" block (from an extended-thinking
+// request), it is surfaced as a <think>...</think> block prefixed to
+// Response.Content, mirroring the convention used for DeepSeek reasoning.
 func FromAntResponse(r *AntResponse, providerName string) *types.Response {
 	resp := &types.Response{
 		Provider: providerName,
 		Model:    r.Model,
 	}
+	var reasoning, text string
 	for _, block := range r.Content {
 		switch block.Type {
 		case "text":
-			resp.Content += block.Text
+			text += block.Text
+		case "thinking":
+			reasoning += block.Thinking
 		case "tool_use":
 			argsJSON, _ := json.Marshal(block.Input)
 			resp.ToolCalls = append(resp.ToolCalls, types.ToolCall{
@@ -132,6 +149,11 @@ func FromAntResponse(r *AntResponse, providerName string) *types.Response {
 				Arguments: string(argsJSON),
 			})
 		}
+	}
+	if reasoning != "" {
+		resp.Content = "<think>\n" + reasoning + "\n</think>\n" + text
+	} else {
+		resp.Content = text
 	}
 	if r.Usage != nil {
 		resp.Usage = &types.UsageData{

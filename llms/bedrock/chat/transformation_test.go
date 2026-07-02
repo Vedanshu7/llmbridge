@@ -13,7 +13,10 @@ func TestToConverseRequestBasic(t *testing.T) {
 			{Role: "user", Content: "Hello"},
 		},
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(cr.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(cr.Messages))
 	}
@@ -30,7 +33,10 @@ func TestToConverseRequestSystemPrompt(t *testing.T) {
 		System:   "You are helpful.",
 		Messages: []types.Message{{Role: "user", Content: "hi"}},
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(cr.System) != 1 || cr.System[0].Text != "You are helpful." {
 		t.Fatalf("unexpected system blocks: %+v", cr.System)
 	}
@@ -42,7 +48,10 @@ func TestToConverseRequestInferenceConfig(t *testing.T) {
 		MaxTokens:   512,
 		Temperature: 0.7,
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if cr.InferenceConfig == nil {
 		t.Fatal("expected InferenceConfig to be set")
 	}
@@ -58,7 +67,10 @@ func TestToConverseRequestNoInferenceConfig(t *testing.T) {
 	req := types.Request{
 		Messages: []types.Message{{Role: "user", Content: "hi"}},
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if cr.InferenceConfig != nil {
 		t.Fatal("expected no InferenceConfig when MaxTokens=0 and Temperature=0")
 	}
@@ -75,7 +87,10 @@ func TestToConverseRequestToolCall(t *testing.T) {
 			},
 		},
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(cr.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(cr.Messages))
 	}
@@ -105,7 +120,10 @@ func TestToConverseRequestTools(t *testing.T) {
 			},
 		},
 	}
-	cr := ToConverseRequest(req)
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if cr.ToolConfig == nil || len(cr.ToolConfig.Tools) != 1 {
 		t.Fatal("expected 1 tool in ToolConfig")
 	}
@@ -117,6 +135,104 @@ func TestToConverseRequestTools(t *testing.T) {
 	var schemaObj map[string]interface{}
 	if err := json.Unmarshal(spec.InputSchema.JSON, &schemaObj); err != nil {
 		t.Fatalf("InputSchema.JSON is not valid JSON: %v", err)
+	}
+}
+
+func TestToConverseRequestWithImageDataURI(t *testing.T) {
+	req := types.Request{
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Parts: []types.ContentPart{
+					{Type: "text", Text: "what is in this image?"},
+					{Type: "image_url", ImageURL: "data:image/png;base64,aGVsbG8="},
+				},
+			},
+		},
+	}
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content := cr.Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(content))
+	}
+	if content[0].Text != "what is in this image?" {
+		t.Fatalf("unexpected text block: %+v", content[0])
+	}
+	if content[1].Image == nil {
+		t.Fatalf("expected image block: %+v", content[1])
+	}
+	if content[1].Image.Format != "png" {
+		t.Fatalf("expected format=png, got %q", content[1].Image.Format)
+	}
+	if content[1].Image.Source.Bytes != "aGVsbG8=" {
+		t.Fatalf("unexpected image bytes: %q", content[1].Image.Source.Bytes)
+	}
+}
+
+func TestToConverseRequestImageFormatNormalizesJPG(t *testing.T) {
+	req := types.Request{
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Parts: []types.ContentPart{
+					{Type: "image_url", ImageURL: "data:image/jpg;base64,aGVsbG8="},
+				},
+			},
+		},
+	}
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cr.Messages[0].Content[0].Image.Format != "jpeg" {
+		t.Fatalf("expected jpg to normalize to jpeg, got %q", cr.Messages[0].Content[0].Image.Format)
+	}
+}
+
+func TestToConverseRequestRemoteImageURLErrors(t *testing.T) {
+	req := types.Request{
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Parts: []types.ContentPart{
+					{Type: "image_url", ImageURL: "https://example.com/cat.png"},
+				},
+			},
+		},
+	}
+	if _, err := ToConverseRequest(req); err == nil {
+		t.Fatal("expected error for remote image URL, got nil")
+	}
+}
+
+func TestToConverseRequestMixedTextAndImageParts(t *testing.T) {
+	req := types.Request{
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Parts: []types.ContentPart{
+					{Type: "text", Text: "describe this"},
+					{Type: "image_url", ImageURL: "data:image/webp;base64,d2VicA=="},
+				},
+			},
+			{Role: "assistant", Content: "a description"},
+		},
+	}
+	cr, err := ToConverseRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cr.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(cr.Messages))
+	}
+	if len(cr.Messages[0].Content) != 2 {
+		t.Fatalf("expected 2 blocks in first message, got %d", len(cr.Messages[0].Content))
+	}
+	if cr.Messages[1].Content[0].Text != "a description" {
+		t.Fatalf("unexpected second message content: %+v", cr.Messages[1].Content)
 	}
 }
 

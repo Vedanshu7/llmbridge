@@ -280,3 +280,61 @@ func QueryUsage(db *sql.DB, f UsageFilter) (*UsageSummary, error) {
 	}
 	return summary, rows.Err()
 }
+
+// QueryUsageRecords returns raw usage_records rows matching the filter,
+// ordered by timestamp ascending. Unlike QueryUsage, which returns per-model
+// aggregates, this is used for CSV/audit export of individual requests.
+func QueryUsageRecords(db *sql.DB, f UsageFilter) ([]UsageRecord, error) {
+	var conds []string
+	var args []interface{}
+
+	if f.Key != "" {
+		conds = append(conds, "key = ?")
+		args = append(args, f.Key)
+	}
+	if f.OrgID != "" {
+		conds = append(conds, "org_id = ?")
+		args = append(args, f.OrgID)
+	}
+	if f.TeamID != "" {
+		conds = append(conds, "team_id = ?")
+		args = append(args, f.TeamID)
+	}
+	if f.From > 0 {
+		conds = append(conds, "ts >= ?")
+		args = append(args, f.From)
+	}
+	if f.To > 0 {
+		conds = append(conds, "ts <= ?")
+		args = append(args, f.To)
+	}
+
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+
+	rows, err := db.Query(
+		`SELECT id, key, org_id, team_id, model, provider, prompt_tokens, completion_tokens, cost_usd, ts
+		 FROM usage_records`+where+`
+		 ORDER BY ts ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("persistence: query usage records: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UsageRecord
+	for rows.Next() {
+		var rec UsageRecord
+		var ts int64
+		if err := rows.Scan(&rec.ID, &rec.Key, &rec.OrgID, &rec.TeamID, &rec.Model, &rec.Provider,
+			&rec.PromptTokens, &rec.CompletionTokens, &rec.CostUSD, &ts); err != nil {
+			return nil, fmt.Errorf("persistence: query usage records scan: %w", err)
+		}
+		rec.Timestamp = time.Unix(ts, 0)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}

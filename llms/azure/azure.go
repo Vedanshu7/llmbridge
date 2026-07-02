@@ -22,11 +22,12 @@ const defaultAPIVersion = "2024-02-01"
 // Provider calls Azure OpenAI Service using the chat completions API.
 // Construct with New; do not create the struct directly.
 type Provider struct {
-	resource   string
-	deployment string
-	apiKey     string
-	apiVersion string
-	client     *http.Client
+	resource        string
+	deployment      string
+	apiKey          string
+	apiVersion      string
+	client          *http.Client
+	embedDeployment string // optional; falls back to the chat deployment if empty
 }
 
 // New returns an Azure OpenAI Provider.
@@ -45,6 +46,13 @@ func New(resource, deployment, apiKey, apiVersion string) *Provider {
 		apiVersion: apiVersion,
 		client:     &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// WithEmbedDeployment sets the Azure deployment name used for Embed calls.
+// If not called, Embed falls back to the chat completions deployment.
+func (p *Provider) WithEmbedDeployment(deployment string) *Provider {
+	p.embedDeployment = deployment
+	return p
 }
 
 // Name implements base.LLM.
@@ -118,10 +126,61 @@ func (p *Provider) Stream(ctx context.Context, req types.Request) (<-chan types.
 	return ch, nil
 }
 
+// Embed implements base.EmbedProvider against an Azure OpenAI embeddings
+// deployment. It uses embedDeployment if set via WithEmbedDeployment,
+// otherwise falls back to the chat completions deployment.
+func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+	wireReq := map[string]interface{}{"input": texts}
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "marshal: "+err.Error(), err)
+	}
+
+	raw, err := p.postURL(p.embedURL(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	var wire struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "parse embeddings: "+err.Error(), err)
+	}
+	if wire.Error != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "API error: "+wire.Error.Message, nil)
+	}
+
+	out := make([][]float64, len(wire.Data))
+	for _, d := range wire.Data {
+		if d.Index >= 0 && d.Index < len(out) {
+			out[d.Index] = d.Embedding
+		}
+	}
+	return out, nil
+}
+
 func (p *Provider) chatURL() string {
 	return fmt.Sprintf(
 		"https://%s.openai.azure.com/openai/deployments/%s/chat/completions?api-version=%s",
 		p.resource, p.deployment, p.apiVersion,
+	)
+}
+
+func (p *Provider) embedURL() string {
+	deployment := p.embedDeployment
+	if deployment == "" {
+		deployment = p.deployment
+	}
+	return fmt.Sprintf(
+		"https://%s.openai.azure.com/openai/deployments/%s/embeddings?api-version=%s",
+		p.resource, deployment, p.apiVersion,
 	)
 }
 
@@ -155,6 +214,32 @@ func (p *Provider) post(body []byte) (*chat.OAIResponse, error) {
 		return nil, exceptions.NewProviderError(p.Name(), 0, "API error: "+out.Error.Message, nil)
 	}
 	return &out, nil
+}
+
+// postURL is a generic POST helper that returns the raw response body,
+// unlike post() which is hardwired to chatURL() and the chat.OAIResponse shape.
+func (p *Provider) postURL(url string, body []byte) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("api-key", p.apiKey)
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, err.Error(), err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, exceptions.NewProviderError(p.Name(), 0, "read body: "+err.Error(), err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, exceptions.ClassifyHTTPError(p.Name(), resp.StatusCode, raw)
+	}
+	return raw, nil
 }
 
 func (p *Provider) newStreamConn(body []byte) (*http.Response, error) {
