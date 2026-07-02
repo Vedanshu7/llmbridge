@@ -11,6 +11,7 @@ import (
 	geminiCost "github.com/Vedanshu7/llmbridge/llms/gemini"
 	mistralCost "github.com/Vedanshu7/llmbridge/llms/mistral"
 	openaiCost "github.com/Vedanshu7/llmbridge/llms/openai"
+	voyageCost "github.com/Vedanshu7/llmbridge/llms/voyage"
 	"github.com/Vedanshu7/llmbridge/types"
 )
 
@@ -53,6 +54,9 @@ func CompletionCost(resp *types.Response) (float64, error) {
 // EmbeddingCost calculates the cost for an embedding request.
 // provider is the provider name; tokens is the input token count.
 func EmbeddingCost(provider, model string, tokens int) (float64, error) {
+	if provider == "voyage" {
+		return voyageCost.CostForEmbedding(model, tokens)
+	}
 	embeddingPrices := map[string]float64{
 		"text-embedding-3-small": 0.00000002,
 		"text-embedding-3-large": 0.00000013,
