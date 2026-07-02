@@ -29,6 +29,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -36,22 +37,23 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	llmbridge "github.com/Vedanshu7/llmbridge"
-	"github.com/Vedanshu7/llmbridge/callbacks"
 	"github.com/Vedanshu7/llmbridge/caching"
+	"github.com/Vedanshu7/llmbridge/callbacks"
 	"github.com/Vedanshu7/llmbridge/guardrails"
 	"github.com/Vedanshu7/llmbridge/llms/base"
+	"github.com/Vedanshu7/llmbridge/proxy/audit"
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 	"github.com/Vedanshu7/llmbridge/proxy/config"
 	"github.com/Vedanshu7/llmbridge/proxy/management"
 	"github.com/Vedanshu7/llmbridge/proxy/metrics"
 	"github.com/Vedanshu7/llmbridge/proxy/middleware"
 	"github.com/Vedanshu7/llmbridge/proxy/persistence"
-	"github.com/Vedanshu7/llmbridge/proxy/audit"
 	"github.com/Vedanshu7/llmbridge/proxy/prompts"
 	"github.com/Vedanshu7/llmbridge/proxy/secrets"
 	"github.com/Vedanshu7/llmbridge/proxy/ui"
@@ -428,6 +430,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /admin/teams", admin(http.HandlerFunc(s.handleListTeams)))
 	mux.Handle("GET /admin/stats", admin(http.HandlerFunc(s.handleAdminStats)))
 	mux.Handle("GET /admin/usage", admin(http.HandlerFunc(s.handleAdminUsage)))
+	mux.Handle("GET /admin/usage/export", admin(http.HandlerFunc(s.handleAdminUsageExport)))
 	mux.Handle("GET /admin/audit-log", admin(http.HandlerFunc(s.auditLog.HandleList)))
 
 	// Prompt management endpoints.
@@ -493,8 +496,8 @@ func (s *Server) handleListAliases(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetAlias(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Alias    string `json:"alias"`
-		Model    string `json:"model"`
+		Alias string `json:"alias"`
+		Model string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Alias == "" || body.Model == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "alias and model fields required")
@@ -695,12 +698,12 @@ func (s *Server) handleModerations(w http.ResponseWriter, r *http.Request) {
 
 // openAIChatRequest is the subset of the OpenAI chat completions request we parse.
 type openAIChatRequest struct {
-	Model       string             `json:"model"`
-	Messages    []openAIMessage    `json:"messages"`
-	Temperature float64            `json:"temperature"`
-	MaxTokens   int                `json:"max_tokens"`
-	Stream      bool               `json:"stream"`
-	Tools       []openAIToolDef    `json:"tools,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []openAIMessage `json:"messages"`
+	Temperature float64         `json:"temperature"`
+	MaxTokens   int             `json:"max_tokens"`
+	Stream      bool            `json:"stream"`
+	Tools       []openAIToolDef `json:"tools,omitempty"`
 }
 
 type openAIMessage struct {
@@ -1560,14 +1563,9 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
-	if s.usageDB == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"note":    "usage analytics requires a persistent database (start with -db flag)",
-			"summary": persistence.UsageSummary{ByModel: map[string]*persistence.ModelUsage{}},
-		})
-		return
-	}
+// parseUsageFilter extracts the common from/to/key/org_id/team_id query
+// params shared by the usage and usage-export admin endpoints.
+func parseUsageFilter(r *http.Request) persistence.UsageFilter {
 	q := r.URL.Query()
 	var from, to int64
 	if v := q.Get("from"); v != "" {
@@ -1576,19 +1574,62 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("to"); v != "" {
 		fmt.Sscanf(v, "%d", &to) //nolint:errcheck
 	}
-	f := persistence.UsageFilter{
+	return persistence.UsageFilter{
 		Key:    q.Get("key"),
 		OrgID:  q.Get("org_id"),
 		TeamID: q.Get("team_id"),
 		From:   from,
 		To:     to,
 	}
-	summary, err := persistence.QueryUsage(s.usageDB, f)
+}
+
+func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
+	if s.usageDB == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"note":    "usage analytics requires a persistent database (start with -db flag)",
+			"summary": persistence.UsageSummary{ByModel: map[string]*persistence.ModelUsage{}},
+		})
+		return
+	}
+	summary, err := persistence.QueryUsage(s.usageDB, parseUsageFilter(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"summary": summary})
+}
+
+// handleAdminUsageExport streams raw usage_records rows matching the filter
+// as a CSV attachment, for spend-log auditing/export.
+func (s *Server) handleAdminUsageExport(w http.ResponseWriter, r *http.Request) {
+	if s.usageDB == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable",
+			"usage export requires a persistent database (start with -db flag)")
+		return
+	}
+	records, err := persistence.QueryUsageRecords(s.usageDB, parseUsageFilter(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", `attachment; filename="usage_export.csv"`)
+	w.WriteHeader(http.StatusOK)
+
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{
+		"id", "key", "org_id", "team_id", "model", "provider",
+		"prompt_tokens", "completion_tokens", "cost_usd", "timestamp",
+	})
+	for _, rec := range records {
+		_ = cw.Write([]string{
+			rec.ID, rec.Key, rec.OrgID, rec.TeamID, rec.Model, rec.Provider,
+			strconv.Itoa(rec.PromptTokens), strconv.Itoa(rec.CompletionTokens),
+			strconv.FormatFloat(rec.CostUSD, 'f', 6, 64), rec.Timestamp.UTC().Format(time.RFC3339),
+		})
+	}
+	cw.Flush()
 }
 
 // ---- Webhook helpers ----
