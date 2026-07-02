@@ -39,6 +39,10 @@ func CompletionCost(resp *types.Response) (float64, error) {
 		return mistralCost.CostForResponse(resp)
 	case "deepseek":
 		return deepseekCost.CostForResponse(resp)
+	case "vertexai":
+		// Vertex AI charges the same per-token rate as AI Studio for
+		// identical Gemini model names, so reuse Gemini's pricing table.
+		return geminiCost.CostForResponse(resp)
 	default:
 		// For OpenAI-compatible providers (groq, together, deepseek, etc.)
 		// fall back to the model info DB if available.
