@@ -121,6 +121,7 @@ func NewServer(provider base.LLM) *Server {
 		oidcProviders: make(map[string]*auth.OIDCProvider),
 		oidcStates:    auth.NewOIDCStateStore(),
 	}
+	s.wireSpendAlerts()
 	s.mux = s.buildMux()
 	return s
 }
@@ -160,8 +161,22 @@ func NewServerWithDB(provider base.LLM, dbPath string) (*Server, error) {
 		oidcStates:    auth.NewOIDCStateStore(),
 		usageDB:       db,
 	}
+	s.wireSpendAlerts()
 	s.mux = s.buildMux()
 	return s, nil
+}
+
+// wireSpendAlerts connects the key store's spend-alert callback to webhook delivery.
+func (s *Server) wireSpendAlerts() {
+	ws := s.webhookStore
+	s.keyStore.OnSpendAlert(func(key, orgID string, currentSpend, limit float64) {
+		ws.DeliverSpendAlert(orgID, webhooks.SpendThresholdPayload{
+			OrgID:        orgID,
+			CurrentSpend: currentSpend,
+			Budget:       limit,
+			PercentUsed:  currentSpend / limit * 100,
+		})
+	})
 }
 
 // RateLimiter returns the server's rate limiter, allowing callers to set

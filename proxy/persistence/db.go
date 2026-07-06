@@ -84,6 +84,8 @@ func Migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS usage_records_key_ts ON usage_records (key, ts)`,
 		`CREATE INDEX IF NOT EXISTS usage_records_org_ts  ON usage_records (org_id, ts)`,
 		`CREATE INDEX IF NOT EXISTS usage_records_team_ts ON usage_records (team_id, ts)`,
+		// Migration for spend alert thresholds.
+		`ALTER TABLE api_keys ADD COLUMN spend_alert_threshold REAL NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

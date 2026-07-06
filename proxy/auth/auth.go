@@ -31,6 +31,10 @@ type KeyInfo struct {
 	// Valid values: "daily", "weekly", "monthly". Empty = no automatic reset.
 	ResetPeriod string    `json:"reset_period,omitempty"`
 	LastReset   time.Time `json:"last_reset,omitempty"`
+	// SpendAlertThreshold is the fraction of SpendLimit at which a spend alert
+	// webhook fires. For example 0.8 fires an alert when spend reaches 80% of
+	// the limit. Zero or negative disables alerting.
+	SpendAlertThreshold float64 `json:"spend_alert_threshold,omitempty"`
 }
 
 // IsPeriodElapsed returns true if the given reset period has elapsed since lastReset.
@@ -66,12 +70,17 @@ func (k *KeyInfo) ResolveModel(model string, globalAliases map[string]string) st
 	return model
 }
 
+// SpendAlertFn is called (in a new goroutine) when a key's spend first crosses
+// its configured alert threshold. key is the raw key string; orgID may be empty.
+type SpendAlertFn func(key, orgID string, currentSpend, limit float64)
+
 // APIKeyStore is a thread-safe store of API keys backed by an optional SQLite database.
 // When db is nil the store operates entirely in memory (suitable for tests or embedded use).
 type APIKeyStore struct {
-	mu   sync.RWMutex
-	keys map[string]*KeyInfo
-	db   *sql.DB // nil = in-memory only
+	mu           sync.RWMutex
+	keys         map[string]*KeyInfo
+	db           *sql.DB      // nil = in-memory only
+	onSpendAlert SpendAlertFn // nil = no alerting
 }
 
 // NewAPIKeyStore returns an in-memory-only APIKeyStore.
@@ -93,7 +102,8 @@ func (s *APIKeyStore) loadFromDB() error {
 	// Migrate runs before loadFromDB so all columns are guaranteed to exist.
 	rows, err := s.db.Query(
 		`SELECT key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend,
-		        allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset
+		        allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset,
+		        spend_alert_threshold
 		 FROM api_keys`,
 	)
 	if err != nil {
@@ -113,6 +123,7 @@ func (s *APIKeyStore) loadFromDB() error {
 			&scopesJSON, &info.SpendLimit, &info.CurrentSpend,
 			&cidrsJSON, &info.OrgID, &info.TeamID, &aliasesJSON,
 			&info.ResetPeriod, &lastReset,
+			&info.SpendAlertThreshold,
 		); err != nil {
 			return fmt.Errorf("auth: scan key: %w", err)
 		}
@@ -150,12 +161,14 @@ func (s *APIKeyStore) persistKey(info *KeyInfo) {
 	_, _ = s.db.Exec(
 		`INSERT OR REPLACE INTO api_keys
 		 (key, name, created_at, last_used, expires_at, scopes, spend_limit, current_spend,
-		  allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  allowed_cidrs, org_id, team_id, model_aliases, reset_period, last_reset,
+		  spend_alert_threshold)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		info.Key, info.Name, info.CreatedAt.Unix(), info.LastUsed.Unix(), expiresAt,
 		string(scopesJSON), info.SpendLimit, info.CurrentSpend,
 		string(cidrsJSON), info.OrgID, info.TeamID, string(aliasesJSON),
 		info.ResetPeriod, lastReset,
+		info.SpendAlertThreshold,
 	)
 }
 
@@ -314,20 +327,58 @@ func (s *APIKeyStore) SetSpendLimit(key string, limit float64) {
 	s.mu.Unlock()
 }
 
+// OnSpendAlert registers fn to be called (in a goroutine) each time a key's
+// spend first crosses its configured SpendAlertThreshold.
+func (s *APIKeyStore) OnSpendAlert(fn SpendAlertFn) {
+	s.mu.Lock()
+	s.onSpendAlert = fn
+	s.mu.Unlock()
+}
+
+// SetSpendAlertThreshold sets the fraction of spend_limit at which a spend
+// alert fires. threshold must be in (0, 1]; e.g. 0.8 fires at 80% of limit.
+// Setting to 0 disables alerting for the key.
+func (s *APIKeyStore) SetSpendAlertThreshold(key string, threshold float64) {
+	s.mu.Lock()
+	if info, ok := s.keys[key]; ok {
+		info.SpendAlertThreshold = threshold
+		s.persistKey(info)
+	}
+	s.mu.Unlock()
+}
+
 // RecordSpend adds cost to the key's current spend.
 // Returns an error string if the key's spend limit is exceeded.
 func (s *APIKeyStore) RecordSpend(key string, cost float64) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	info, ok := s.keys[key]
 	if !ok {
+		s.mu.Unlock()
 		return nil
 	}
+	prevSpend := info.CurrentSpend
 	info.CurrentSpend += cost
 	s.persistKey(info)
-	if info.SpendLimit > 0 && info.CurrentSpend > info.SpendLimit {
-		return fmt.Errorf("key %s exceeded spend limit: $%.6f of $%.6f",
-			key, info.CurrentSpend, info.SpendLimit)
+
+	// Fire threshold alert when spend crosses the configured fraction for the first time.
+	var alertFn SpendAlertFn
+	if s.onSpendAlert != nil && info.SpendAlertThreshold > 0 && info.SpendLimit > 0 {
+		threshold := info.SpendAlertThreshold * info.SpendLimit
+		if prevSpend < threshold && info.CurrentSpend >= threshold {
+			alertFn = s.onSpendAlert
+		}
+	}
+	orgID := info.OrgID
+	current := info.CurrentSpend
+	limit := info.SpendLimit
+	exceeded := info.SpendLimit > 0 && info.CurrentSpend > info.SpendLimit
+	s.mu.Unlock()
+
+	if alertFn != nil {
+		go alertFn(key, orgID, current, limit)
+	}
+	if exceeded {
+		return fmt.Errorf("key %s exceeded spend limit: $%.6f of $%.6f", key, current, limit)
 	}
 	return nil
 }

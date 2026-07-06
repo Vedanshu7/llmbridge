@@ -628,3 +628,64 @@ func TestZeroKeySpend(t *testing.T) {
 		t.Error("expected LastReset to be set after reset")
 	}
 }
+
+// ---- Spend alert threshold ----
+
+func TestSpendAlertFiresAtThreshold(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"completion"})
+	store.SetSpendLimit(key, 10.0)
+	store.SetSpendAlertThreshold(key, 0.8) // fire at 80% = $8.00
+
+	fired := make(chan struct{}, 1)
+	store.OnSpendAlert(func(k, orgID string, spend, limit float64) {
+		fired <- struct{}{}
+	})
+
+	_ = store.RecordSpend(key, 7.0) // 70% — no alert
+	select {
+	case <-fired:
+		t.Fatal("alert fired before threshold")
+	default:
+	}
+
+	_ = store.RecordSpend(key, 1.5) // 85% — should fire
+	select {
+	case <-fired:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("alert did not fire within 100ms")
+	}
+}
+
+func TestSpendAlertNoFireWithoutLimit(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"completion"})
+	store.SetSpendAlertThreshold(key, 0.8) // threshold set but no spend limit
+
+	fired := make(chan struct{}, 1)
+	store.OnSpendAlert(func(k, orgID string, spend, limit float64) { fired <- struct{}{} })
+
+	_ = store.RecordSpend(key, 999.0)
+	select {
+	case <-fired:
+		t.Fatal("alert should not fire when no spend limit is set")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSpendAlertDoesNotFireTwice(t *testing.T) {
+	store := NewAPIKeyStore()
+	key, _ := store.GenerateAPIKey([]string{"completion"})
+	store.SetSpendLimit(key, 10.0)
+	store.SetSpendAlertThreshold(key, 0.5)
+
+	count := make(chan struct{}, 10)
+	store.OnSpendAlert(func(k, orgID string, spend, limit float64) { count <- struct{}{} })
+
+	_ = store.RecordSpend(key, 6.0) // crosses 50% — one alert
+	_ = store.RecordSpend(key, 1.0) // already above threshold — no second alert
+	time.Sleep(50 * time.Millisecond)
+	if len(count) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(count))
+	}
+}
