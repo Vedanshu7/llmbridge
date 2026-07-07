@@ -124,6 +124,36 @@ func (km *KeyManagement) HandleSetRateLimit(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// HandleRotate handles POST /admin/key/rotate.
+// Body: {"key": "llmb-xxx", "grace_period_seconds": 3600}.
+// Issues a new key inheriting all settings from the old key. The old key
+// remains valid for grace_period_seconds (default: 3600) to allow callers
+// to transition without hard failures.
+func (km *KeyManagement) HandleRotate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Key                string `json:"key"`
+		GracePeriodSeconds int    `json:"grace_period_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key field required"})
+		return
+	}
+	grace := time.Duration(body.GracePeriodSeconds) * time.Second
+	if grace <= 0 {
+		grace = time.Hour
+	}
+	newKey, err := km.store.RotateKey(body.Key, grace)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"new_key":      newKey,
+		"old_key":      body.Key,
+		"grace_expires": time.Now().Add(grace).UTC().Format(time.RFC3339),
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

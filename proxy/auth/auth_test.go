@@ -629,6 +629,65 @@ func TestZeroKeySpend(t *testing.T) {
 	}
 }
 
+// ---- Key rotation ----
+
+func TestRotateKeyIssuesNewKey(t *testing.T) {
+	store := NewAPIKeyStore()
+	old, _ := store.GenerateAPIKey([]string{"completion", "admin"})
+	store.SetSpendLimit(old, 50.0)
+	store.SetKeyOrg(old, "org-1")
+
+	newKey, err := store.RotateKey(old, time.Hour)
+	if err != nil {
+		t.Fatalf("RotateKey error: %v", err)
+	}
+	if newKey == old {
+		t.Fatal("new key must differ from old key")
+	}
+
+	// New key should inherit settings.
+	info, ok := store.ValidateAPIKey(newKey)
+	if !ok {
+		t.Fatal("new key not found")
+	}
+	if info.SpendLimit != 50.0 {
+		t.Errorf("expected SpendLimit=50, got %f", info.SpendLimit)
+	}
+	if info.OrgID != "org-1" {
+		t.Errorf("expected OrgID=org-1, got %q", info.OrgID)
+	}
+}
+
+func TestRotateKeyOldKeyExpiresAfterGrace(t *testing.T) {
+	store := NewAPIKeyStore()
+	old, _ := store.GenerateAPIKey([]string{"completion"})
+
+	_, err := store.RotateKey(old, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RotateKey error: %v", err)
+	}
+
+	// Old key should still be valid immediately.
+	if _, ok := store.ValidateAPIKey(old); !ok {
+		t.Fatal("old key should still be valid during grace period")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Old key should be expired after grace period.
+	if _, ok := store.ValidateAPIKey(old); ok {
+		t.Fatal("old key should have expired after grace period")
+	}
+}
+
+func TestRotateKeyNotFound(t *testing.T) {
+	store := NewAPIKeyStore()
+	_, err := store.RotateKey("llmb-nonexistent", time.Hour)
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+}
+
 // ---- Spend alert threshold ----
 
 func TestSpendAlertFiresAtThreshold(t *testing.T) {

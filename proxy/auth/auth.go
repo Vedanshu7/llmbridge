@@ -418,3 +418,54 @@ func (s *APIKeyStore) HasScope(key, scope string) bool {
 	}
 	return false
 }
+
+// RotateKey creates a replacement key that inherits the old key's configuration
+// (scopes, spend limit, org, team, model aliases, reset period, alert threshold).
+// The old key is given a gracePeriod before it expires, allowing in-flight
+// callers to transition without hard failures. Returns the new key string.
+func (s *APIKeyStore) RotateKey(oldKey string, gracePeriod time.Duration) (string, error) {
+	s.mu.Lock()
+	old, ok := s.keys[oldKey]
+	if !ok {
+		s.mu.Unlock()
+		return "", fmt.Errorf("key not found: %s", oldKey)
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	newKey := "llmb-" + hex.EncodeToString(b)
+
+	newInfo := &KeyInfo{
+		Key:                 newKey,
+		Name:                old.Name,
+		CreatedAt:           time.Now(),
+		Scopes:              append([]string(nil), old.Scopes...),
+		SpendLimit:          old.SpendLimit,
+		OrgID:               old.OrgID,
+		TeamID:              old.TeamID,
+		ResetPeriod:         old.ResetPeriod,
+		SpendAlertThreshold: old.SpendAlertThreshold,
+	}
+	if len(old.ModelAliases) > 0 {
+		newInfo.ModelAliases = make(map[string]string, len(old.ModelAliases))
+		for k, v := range old.ModelAliases {
+			newInfo.ModelAliases[k] = v
+		}
+	}
+	if len(old.AllowedCIDRs) > 0 {
+		newInfo.AllowedCIDRs = append([]string(nil), old.AllowedCIDRs...)
+	}
+
+	// Expire the old key after the grace period.
+	old.ExpiresAt = time.Now().Add(gracePeriod)
+
+	s.keys[newKey] = newInfo
+	s.persistKey(newInfo)
+	s.persistKey(old)
+	s.mu.Unlock()
+
+	return newKey, nil
+}
