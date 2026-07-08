@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,5 +104,46 @@ func TestAdminUsageExportRequiresAdminScope(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Errorf("want 403 for missing admin scope, got %d", w.Code)
+	}
+}
+
+func TestStreamingRequestAppearsInUsageRecords(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	stub := &fullStub{streamDeltas: []string{"hello", " world"}}
+	stub.resp = &types.Response{Content: "hello world"}
+	srv, err := NewServerWithDB(stub, dbPath)
+	if err != nil {
+		t.Fatalf("NewServerWithDB: %v", err)
+	}
+	apiKey, _ := srv.keyStore.GenerateAPIKey([]string{"completion", "admin"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":  "gpt-4o",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream request: got %d: %s", w.Code, w.Body.String())
+	}
+	// Drain the SSE stream to ensure post-stream recording has run.
+	scanner := bufio.NewScanner(strings.NewReader(w.Body.String()))
+	for scanner.Scan() {
+	}
+
+	// Check usage_records table.
+	summary, err := persistence.QueryUsage(srv.usageDB, persistence.UsageFilter{})
+	if err != nil {
+		t.Fatalf("QueryUsage: %v", err)
+	}
+	if summary.TotalRequests < 1 {
+		t.Errorf("expected at least 1 usage record after streaming request, got %d", summary.TotalRequests)
 	}
 }

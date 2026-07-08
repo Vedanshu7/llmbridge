@@ -1151,10 +1151,13 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ct
 	}
 
 	// Post-stream budget tracking (best-effort; cost estimate only).
+	var streamOrgID, streamTeamID string
 	if streamAPIKey != "" && promptTokens+completionTokens > 0 {
 		if cost, costErr := llmbridge.CompletionCost(syntheticResp); costErr == nil && cost > 0 {
 			_ = s.keyStore.RecordSpend(streamAPIKey, cost)
 			if keyInfo, ok := s.keyStore.ValidateAPIKey(streamAPIKey); ok {
+				streamOrgID = keyInfo.OrgID
+				streamTeamID = keyInfo.TeamID
 				if keyInfo.TeamID != "" {
 					_ = s.orgStore.RecordTeamSpend(keyInfo.TeamID, cost)
 				} else if keyInfo.OrgID != "" {
@@ -1163,6 +1166,26 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, ct
 			}
 		}
 	}
+
+	// Record granular usage for analytics (streaming path).
+	if s.usageDB != nil && (promptTokens+completionTokens > 0) {
+		rec := persistence.UsageRecord{
+			ID:               newBatchID(),
+			Key:              streamAPIKey,
+			OrgID:            streamOrgID,
+			TeamID:           streamTeamID,
+			Model:            req.Model,
+			Provider:         s.provider.Name(),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			Timestamp:        time.Now(),
+		}
+		if cost, cerr := llmbridge.CompletionCost(syntheticResp); cerr == nil {
+			rec.CostUSD = cost
+		}
+		_ = persistence.RecordUsage(s.usageDB, rec)
+	}
+
 	s.collector.RecordTokens(promptTokens, completionTokens)
 	s.fireCompletionWebhooks(ctx, syntheticResp, streamAPIKey, "")
 
