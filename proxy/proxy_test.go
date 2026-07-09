@@ -934,3 +934,42 @@ func TestBatchCancelInProcess(t *testing.T) {
 		t.Fatalf("cancel: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
+
+// ---- Provider health endpoint ----
+
+func TestAdminHealthEndpointSingleProvider(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv := NewServer(p)
+	adminKey, _ := srv.keyStore.GenerateAPIKey([]string{"admin"})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer "+adminKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	providers, ok := out["providers"].([]interface{})
+	if !ok || len(providers) < 1 {
+		t.Fatalf("expected at least one provider in response, got: %+v", out)
+	}
+}
+
+func TestAdminHealthRequiresAdminScope(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, key := newTestServer(p) // completion scope only
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-admin key, got %d", w.Code)
+	}
+}

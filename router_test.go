@@ -2,6 +2,7 @@ package llmbridge
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -555,5 +556,41 @@ func TestRecordSuccess(t *testing.T) {
 	}
 	if !h.CooldownUntil.IsZero() {
 		t.Fatal("expected CooldownUntil to be reset after success")
+	}
+}
+
+func TestProviderHealthReturnsAllProviders(t *testing.T) {
+	a := goodProvider("alpha")
+	b := goodProvider("beta")
+	r := NewRouter([]Provider{a, b})
+
+	health := r.ProviderHealth()
+	if len(health) != 2 {
+		t.Fatalf("expected 2 health entries, got %d", len(health))
+	}
+	names := map[string]bool{}
+	for _, h := range health {
+		names[h.Name] = true
+		if !h.Healthy {
+			t.Errorf("provider %q should start healthy", h.Name)
+		}
+	}
+	if !names["alpha"] || !names["beta"] {
+		t.Errorf("expected alpha and beta in health snapshot, got %v", names)
+	}
+}
+
+func TestProviderHealthReflectsFailures(t *testing.T) {
+	fail := &fakeProvider{name: "bad", err: fmt.Errorf("timeout")}
+	r := NewRouter([]Provider{fail}, WithCircuitBreaker(1, 5*time.Minute))
+
+	_, _ = r.Complete(context.Background(), types.Request{})
+
+	health := r.ProviderHealth()
+	if len(health) == 0 {
+		t.Fatal("expected at least one health entry")
+	}
+	if health[0].Failures < 1 {
+		t.Errorf("expected Failures>=1, got %d", health[0].Failures)
 	}
 }

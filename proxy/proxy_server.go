@@ -445,6 +445,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /admin/orgs", admin(http.HandlerFunc(s.handleListOrgs)))
 	mux.Handle("POST /admin/teams", admin(http.HandlerFunc(s.handleCreateTeam)))
 	mux.Handle("GET /admin/teams", admin(http.HandlerFunc(s.handleListTeams)))
+	mux.Handle("GET /admin/health", admin(http.HandlerFunc(s.handleProviderHealth)))
 	mux.Handle("GET /admin/stats", admin(http.HandlerFunc(s.handleAdminStats)))
 	mux.Handle("GET /admin/usage", admin(http.HandlerFunc(s.handleAdminUsage)))
 	mux.Handle("GET /admin/usage/export", admin(http.HandlerFunc(s.handleAdminUsageExport)))
@@ -471,6 +472,21 @@ func (s *Server) buildMux() *http.ServeMux {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
+	if router, ok := s.provider.(*llmbridge.Router); ok {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"providers": router.ProviderHealth(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"providers": []map[string]interface{}{{
+			"name":    s.provider.Name(),
+			"healthy": true,
+		}},
+	})
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {

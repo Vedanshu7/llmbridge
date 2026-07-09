@@ -327,6 +327,38 @@ func (r *Router) Name() string { return "router" }
 // ValidateEnvironment implements Provider.
 func (r *Router) ValidateEnvironment() error { return nil }
 
+// ProviderHealthInfo describes the current health of one provider in the router.
+type ProviderHealthInfo struct {
+	Name          string    `json:"name"`
+	Healthy       bool      `json:"healthy"`
+	Failures      int       `json:"failures,omitempty"`
+	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
+	LastCheck     time.Time `json:"last_check,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+}
+
+// ProviderHealth returns a snapshot of the health state of all providers in the router.
+func (r *Router) ProviderHealth() []ProviderHealthInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ProviderHealthInfo, len(r.providers))
+	for i, p := range r.providers {
+		h := r.health[i]
+		info := ProviderHealthInfo{
+			Name:          p.Name(),
+			Healthy:       h.Healthy,
+			Failures:      h.Failures,
+			CooldownUntil: h.CooldownUntil,
+			LastCheck:     h.LastCheck,
+		}
+		if h.LastError != nil {
+			info.LastError = h.LastError.Error()
+		}
+		out[i] = info
+	}
+	return out
+}
+
 // Complete implements Provider.
 func (r *Router) Complete(ctx context.Context, req types.Request) (*types.Response, error) {
 	if r.maxCostPerRequest > 0 {
