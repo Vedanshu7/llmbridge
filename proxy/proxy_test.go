@@ -973,3 +973,78 @@ func TestAdminHealthRequiresAdminScope(t *testing.T) {
 		t.Errorf("expected 403 for non-admin key, got %d", w.Code)
 	}
 }
+
+// ---- Idempotency key middleware ----
+
+func TestIdempotencyKeyReplaysCachedResponse(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "first response"}}
+	srv, key := newTestServer(p)
+
+	do := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := chatReq("gpt-4o", "hello")
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("X-Idempotency-Key", "test-idem-key-1")
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	r1 := do()
+	if r1.Code != http.StatusOK {
+		t.Fatalf("first request: got %d", r1.Code)
+	}
+	if p.calls != 1 {
+		t.Fatalf("expected 1 provider call after first request, got %d", p.calls)
+	}
+
+	// Change the provider response — idempotency should serve the cached one.
+	p.resp = &types.Response{Content: "second response"}
+	r2 := do()
+	if r2.Code != http.StatusOK {
+		t.Fatalf("second request: got %d", r2.Code)
+	}
+	if p.calls != 1 {
+		t.Fatalf("expected still 1 provider call (cached), got %d", p.calls)
+	}
+	if r2.Header().Get("X-Idempotency-Replayed") != "true" {
+		t.Error("expected X-Idempotency-Replayed: true on cached response")
+	}
+}
+
+func TestIdempotencyKeyDifferentKeysAreIndependent(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, key := newTestServer(p)
+
+	doWith := func(iKey string) {
+		rec := httptest.NewRecorder()
+		req := chatReq("gpt-4o", "hello")
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("X-Idempotency-Key", iKey)
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request with key %q: got %d", iKey, rec.Code)
+		}
+	}
+
+	doWith("key-a")
+	doWith("key-b")
+	doWith("key-c")
+	if p.calls != 3 {
+		t.Errorf("expected 3 provider calls (distinct keys), got %d", p.calls)
+	}
+}
+
+func TestNoIdempotencyKeyBypassesMiddleware(t *testing.T) {
+	p := &stubProvider{resp: &types.Response{Content: "ok"}}
+	srv, key := newTestServer(p)
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		req := chatReq("gpt-4o", "hello")
+		req.Header.Set("Authorization", "Bearer "+key)
+		srv.ServeHTTP(rec, req)
+	}
+	if p.calls != 3 {
+		t.Errorf("expected 3 provider calls without idempotency key, got %d", p.calls)
+	}
+}

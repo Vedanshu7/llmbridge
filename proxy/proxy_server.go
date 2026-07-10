@@ -27,6 +27,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -51,6 +52,7 @@ import (
 	"github.com/Vedanshu7/llmbridge/proxy/audit"
 	"github.com/Vedanshu7/llmbridge/proxy/auth"
 	"github.com/Vedanshu7/llmbridge/proxy/config"
+	"github.com/Vedanshu7/llmbridge/proxy/idempotency"
 	"github.com/Vedanshu7/llmbridge/proxy/management"
 	"github.com/Vedanshu7/llmbridge/proxy/metrics"
 	"github.com/Vedanshu7/llmbridge/proxy/middleware"
@@ -97,7 +99,8 @@ type Server struct {
 	oidcProviders map[string]*auth.OIDCProvider // name → provider
 	oidcStates    *auth.OIDCStateStore
 
-	usageDB *sql.DB // non-nil when backed by SQLite; used for usage_records writes
+	usageDB          *sql.DB // non-nil when backed by SQLite; used for usage_records writes
+	idempotencyStore *idempotency.Store
 
 	verboseLogger callbacks.Handler // nil = disabled; writes full req/resp JSON to file
 
@@ -108,19 +111,20 @@ type Server struct {
 // Pass a *llmbridge.Router as the provider to get multi-backend routing.
 func NewServer(provider base.LLM) *Server {
 	s := &Server{
-		provider:      provider,
-		keyStore:      auth.NewAPIKeyStore(),
-		orgStore:      auth.NewOrgStore(),
-		rateLimiter:   auth.NewRateLimiter(),
-		collector:     metrics.NewCollector(),
-		modelReg:      management.NewModelRegistry(),
-		routerCfg:     management.NewRouterConfig(),
-		batchRecords:  make(map[string]*batchRecord),
-		promptStore:   prompts.NewStore(),
-		webhookStore:  webhooks.NewStore(),
-		auditLog:      audit.New(1000),
-		oidcProviders: make(map[string]*auth.OIDCProvider),
-		oidcStates:    auth.NewOIDCStateStore(),
+		provider:         provider,
+		keyStore:         auth.NewAPIKeyStore(),
+		orgStore:         auth.NewOrgStore(),
+		rateLimiter:      auth.NewRateLimiter(),
+		collector:        metrics.NewCollector(),
+		modelReg:         management.NewModelRegistry(),
+		routerCfg:        management.NewRouterConfig(),
+		batchRecords:     make(map[string]*batchRecord),
+		promptStore:      prompts.NewStore(),
+		webhookStore:     webhooks.NewStore(),
+		auditLog:         audit.New(1000),
+		oidcProviders:    make(map[string]*auth.OIDCProvider),
+		oidcStates:       auth.NewOIDCStateStore(),
+		idempotencyStore: idempotency.NewStore(),
 	}
 	s.wireSpendAlerts()
 	s.mux = s.buildMux()
@@ -147,25 +151,89 @@ func NewServerWithDB(provider base.LLM, dbPath string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		provider:      provider,
-		keyStore:      keyStore,
-		orgStore:      orgStore,
-		rateLimiter:   auth.NewRateLimiter(),
-		collector:     metrics.NewCollector(),
-		modelReg:      management.NewModelRegistry(),
-		routerCfg:     management.NewRouterConfig(),
-		batchRecords:  make(map[string]*batchRecord),
-		promptStore:   ps,
-		webhookStore:  webhooks.NewStore(),
-		auditLog:      audit.New(1000),
-		oidcProviders: make(map[string]*auth.OIDCProvider),
-		oidcStates:    auth.NewOIDCStateStore(),
-		usageDB:       db,
+		provider:         provider,
+		keyStore:         keyStore,
+		orgStore:         orgStore,
+		rateLimiter:      auth.NewRateLimiter(),
+		collector:        metrics.NewCollector(),
+		modelReg:         management.NewModelRegistry(),
+		routerCfg:        management.NewRouterConfig(),
+		batchRecords:     make(map[string]*batchRecord),
+		promptStore:      ps,
+		webhookStore:     webhooks.NewStore(),
+		auditLog:         audit.New(1000),
+		oidcProviders:    make(map[string]*auth.OIDCProvider),
+		oidcStates:       auth.NewOIDCStateStore(),
+		usageDB:          db,
+		idempotencyStore: idempotency.NewStore(),
 	}
 	s.wireSpendAlerts()
 	s.mux = s.buildMux()
 	return s, nil
 }
+
+// idempotencyMiddleware intercepts X-Idempotency-Key headers. On the first
+// request for a given key it records the response and replays it on subsequent
+// requests, ensuring duplicate submissions within the TTL window are safe.
+func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		iKey := r.Header.Get("X-Idempotency-Key")
+		if iKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Build a store key scoped to endpoint + api key so different callers
+		// cannot observe each other's cached responses.
+		apiKey := r.Header.Get("Authorization")
+		storeKey := apiKey + ":" + r.URL.Path + ":" + iKey
+
+		if cached := s.idempotencyStore.Get(storeKey); cached != nil {
+			for k, v := range cached.Headers {
+				w.Header().Set(k, v)
+			}
+			w.Header().Set("X-Idempotency-Replayed", "true")
+			w.WriteHeader(cached.StatusCode)
+			_, _ = w.Write(cached.Body)
+			return
+		}
+
+		rec := &responseRecorder{header: make(http.Header), code: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		// Only cache successful responses (2xx).
+		if rec.code >= 200 && rec.code < 300 {
+			headers := make(map[string]string, len(rec.header))
+			for k := range rec.header {
+				headers[k] = rec.header.Get(k)
+			}
+			s.idempotencyStore.Set(storeKey, &idempotency.Entry{
+				StatusCode: rec.code,
+				Body:       rec.body.Bytes(),
+				Headers:    headers,
+				StoredAt:   time.Now(),
+			})
+		}
+
+		for k, v := range rec.header {
+			for _, vv := range v {
+				w.Header().Add(k, vv)
+			}
+		}
+		w.WriteHeader(rec.code)
+		_, _ = w.Write(rec.body.Bytes())
+	})
+}
+
+// responseRecorder captures a handler's response so it can be cached and replayed.
+type responseRecorder struct {
+	header http.Header
+	body   bytes.Buffer
+	code   int
+}
+
+func (r *responseRecorder) Header() http.Header        { return r.header }
+func (r *responseRecorder) WriteHeader(code int)       { r.code = code }
+func (r *responseRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
 
 // wireSpendAlerts connects the key store's spend-alert callback to webhook delivery.
 func (s *Server) wireSpendAlerts() {
@@ -408,7 +476,8 @@ func (s *Server) buildMux() *http.ServeMux {
 	// Authenticated LLM endpoints (require valid API key or JWT + rate limit).
 	authed := auth.RequireAuth(s.keyStore, s.jwtSecret)
 	limited := auth.RequireRateLimit(s.rateLimiter)
-	authedLimited := func(h http.Handler) http.Handler { return authed(limited(h)) }
+	idem := s.idempotencyMiddleware
+	authedLimited := func(h http.Handler) http.Handler { return authed(limited(idem(h))) }
 	mux.Handle("GET /v1/models", authed(http.HandlerFunc(s.handleListModels)))
 	mux.Handle("GET /v1/models/{model}", authed(http.HandlerFunc(s.handleGetModel)))
 	mux.Handle("POST /v1/chat/completions", authedLimited(http.HandlerFunc(s.handleChatCompletion)))
