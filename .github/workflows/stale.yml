@@ -26,9 +26,19 @@ jobs:
             further activity occurs. Push a commit or comment to keep it open.
           close-issue-message: "Closing due to inactivity. Re-open if this is still relevant."
           close-pr-message: "Closing due to inactivity. Re-open if you'd like to continue."
-          days-before-stale: 60
-          days-before-close: 7
-          stale-issue-label: "stale"
+          # Issues are never marked stale and never auto-closed. This backlog
+          # is deliberate: most of it is provider implementations and coverage
+          # work waiting for a contributor, so age is not evidence that any of
+          # it stopped being wanted. The same bot closed 14 good-first-issues
+          # in the lens repo, which removed that project's whole newcomer
+          # surface. -1 disables each behaviour.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+
+          # Pull requests still go stale. An abandoned branch really does rot,
+          # and unlike an issue it is the author's to revive.
+          days-before-pr-stale: 60
+          days-before-pr-close: 7
           stale-pr-label: "stale"
           exempt-issue-labels: "pinned,security,bug"
           operations-per-run: 500
