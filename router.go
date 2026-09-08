@@ -487,6 +487,8 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Reques
 			case <-time.After(delay):
 			}
 			delay = minDuration(time.Duration(float64(delay)*policy.Multiplier), policy.MaxDelay)
+			// Add full jitter (0–100% of delay) to avoid synchronised retry storms.
+			delay = time.Duration(float64(delay) * rand.Float64())
 		}
 	}
 	return nil, lastErr
