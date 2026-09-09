@@ -481,14 +481,18 @@ func (r *Router) tryWithPolicy(ctx context.Context, p Provider, req types.Reques
 			return nil, err
 		}
 		if attempt < policy.MaxAttempts-1 {
-			select {
+			// Apply full jitter (0–100% of delay) BEFORE sleeping to avoid
+		// synchronised retry storms.  The jitter is local to this sleep:
+		// `delay` is updated without the random factor so the backoff
+		// curve (InitialDelay × Multiplier^n, capped at MaxDelay) is
+		// preserved across attempts.
+		jitteredDelay := time.Duration(float64(delay) * rand.Float64())
+		select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(delay):
+			case <-time.After(jitteredDelay):
 			}
 			delay = minDuration(time.Duration(float64(delay)*policy.Multiplier), policy.MaxDelay)
-			// Add full jitter (0–100% of delay) to avoid synchronised retry storms.
-			delay = time.Duration(float64(delay) * rand.Float64())
 		}
 	}
 	return nil, lastErr
